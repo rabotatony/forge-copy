@@ -1,6 +1,8 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+# =============================================================================
+# Forge — .gitignore
+# =============================================================================
 
-# dependencies
+# Dependencies
 node_modules
 /.pnp
 .pnp.*
@@ -10,62 +12,75 @@ node_modules
 !.yarn/releases
 !.yarn/versions
 
-# testing
+# Testing
 /coverage
 
-# next.js
+# Next.js
 /.next/
 /out/
-
-# production
 /build
 
-# misc
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
+
+# Misc
 .DS_Store
 *.pem
 
-# debug
+# Debug logs
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
-
-# env files (can opt-in for committing if needed)
-.env*
-
-# vercel
-.vercel
-
-
-# typescript
-*.tsbuildinfo
-next-env.d.ts
-local-*
-.claude
-.z-ai-config
 *.log
 dev.log
 dev.out.log
-test
-prompt
-
 server.log
-# Skills directory
+
+# Environment variables (never commit)
+.env*
+!.env.example
+
+# Local config / IDE
+local-*
+.claude
+.z-ai-config
+
+# Process files
+*.pid
+
+# =============================================================================
+# Forge-specific (runtime data, secrets, internal artifacts)
+# =============================================================================
+
+# Skills directory (private tooling)
 /skills/
-# Forge settings (encrypted GitHub token)
+
+# Encrypted GitHub token store
 .forge-settings.json
 
 # Uploaded files (may contain secrets)
 upload/
 
-# Storage (project data, DB)
+# Storage (project data, extracted sources, artifacts)
 storage/
 
-# Database files
+# Database files (SQLite)
 db/
 
-# Tool results
+# Tool results (agent read logs)
 tool-results/
 
-# Next.js build
-.next/
+# Agent worklog (internal build history)
+worklog.md
+
+# Download artifacts (generated output)
+download/
+
+# Stale duplicate snapshot (kept locally, never tracked)
+forge-analysis/
+
+# Prompt files
+prompt
+test

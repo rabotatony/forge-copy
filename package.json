@@ -1,5 +1,6 @@
 {
-  "name": "nextjs_tailwind_shadcn_ts",
+  "name": "forge",
+  "description": "Self-hosted CI/CD platform built on Next.js 16, TypeScript, and Prisma.",
   "version": "0.2.1",
   "private": true,
   "scripts": {
