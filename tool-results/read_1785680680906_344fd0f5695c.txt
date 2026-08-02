@@ -1,0 +1,702 @@
+    53→// Validation
+    54→// ---------------------------------------------------------------------------
+    55→
+    56→export interface ValidationResult {
+    57→  valid: boolean;
+    58→  errors: string[];
+    59→}
+    60→
+    61→/**
+    62→ * Validate a PipelineDefinition:
+    63→ *   - stages must be non-empty
+    64→ *   - all stage IDs unique
+    65→ *   - all `needs` reference existing stages
+    66→ *   - no cycles
+    67→ */
+    68→export function validatePipelineDefinition(def: PipelineDefinition): ValidationResult {
+    69→  const errors: string[] = [];
+    70→  if (!def.stages || def.stages.length === 0) {
+    71→    errors.push('Pipeline must have at least one stage.');
+    72→    return { valid: false, errors };
+    73→  }
+    74→  const ids = new Set<string>();
+    75→  for (const stage of def.stages) {
+    76→    if (!stage.id) {
+    77→      errors.push(`Stage "${stage.name ?? '<unnamed>'}" is missing an id.`);
+    78→      continue;
+    79→    }
+    80→    if (ids.has(stage.id)) {
+    81→      errors.push(`Duplicate stage id: "${stage.id}".`);
+    82→    }
+    83→    ids.add(stage.id);
+    84→  }
+    85→  // Check `needs` references.
+    86→  for (const stage of def.stages) {
+    87→    if (!stage.needs) continue;
+    88→    for (const need of stage.needs) {
+    89→      if (!ids.has(need)) {
+    90→        errors.push(`Stage "${stage.id}" needs unknown stage "${need}".`);
+    91→      }
+    92→      if (need === stage.id) {
+    93→        errors.push(`Stage "${stage.id}" cannot need itself.`);
+    94→      }
+    95→    }
+    96→  }
+    97→  // Cycle detection (DFS).
+    98→  const cycle = detectCycle(def.stages);
+    99→  if (cycle) {
+   100→    errors.push(`Pipeline has a cycle: ${cycle.join(' → ')}.`);
+   101→  }
+   102→  return { valid: errors.length === 0, errors };
+   103→}
+   104→
+   105→function detectCycle(stages: PipelineStage[]): string[] | null {
+   106→  const adj = new Map<string, string[]>();
+   107→  for (const s of stages) adj.set(s.id, s.needs ?? []);
+   108→  const visited = new Set<string>();
+   109→  const path = new Set<string>();
+   110→  const pathList: string[] = [];
+   111→
+   112→  function dfs(node: string): string[] | null {
+   113→    if (path.has(node)) {
+   114→      // Found a cycle — return the cycle path from the first occurrence.
+   115→      const start = pathList.indexOf(node);
+   116→      return [...pathList.slice(start), node];
+   117→    }
+   118→    if (visited.has(node)) return null;
+   119→    visited.add(node);
+   120→    path.add(node);
+   121→    pathList.push(node);
+   122→    for (const dep of adj.get(node) ?? []) {
+   123→      const result = dfs(dep);
+   124→      if (result) return result;
+   125→    }
+   126→    path.delete(node);
+   127→    pathList.pop();
+   128→    return null;
+   129→  }
+   130→
+   131→  for (const s of stages) {
+   132→    const result = dfs(s.id);
+   133→    if (result) return result;
+   134→  }
+   135→  return null;
+   136→}
+   137→
+   138→// ---------------------------------------------------------------------------
+   139→// Topological ordering (Kahn's algorithm — level by level)
+   140→// ---------------------------------------------------------------------------
+   141→
+   142→/**
+   143→ * Group stages into "levels" — sets of stages that can run in parallel
+   144→ * because all their `needs` are in earlier levels.
+   145→ */
+   146→function topologicalLevels(stages: PipelineStage[]): PipelineStage[][] {
+   147→  const byId = new Map(stages.map(s => [s.id, s]));
+   148→  const remaining = new Set(stages.map(s => s.id));
+   149→  const levels: PipelineStage[][] = [];
+   150→  while (remaining.size > 0) {
+   151→    const ready: PipelineStage[] = [];
+   152→    for (const id of remaining) {
+   153→      const stage = byId.get(id)!;
+   154→      const needs = stage.needs ?? [];
+   155→      if (needs.every(n => !remaining.has(n))) {
+   156→        ready.push(stage);
+   157→      }
+   158→    }
+   159→    if (ready.length === 0) {
+   160→      // Shouldn't happen — cycle detection should have caught this.
+   161→      break;
+   162→    }
+   163→    for (const s of ready) remaining.delete(s.id);
+   164→    levels.push(ready);
+   165→  }
+   166→  return levels;
+   167→}
+   168→
+   169→// ---------------------------------------------------------------------------
+   170→// Condition evaluation
+   171→// ---------------------------------------------------------------------------
+   172→
+   173→interface ConditionContext {
+   174→  matrix: MatrixRow;
+   175→  // Status of all needed stages: { stageId: 'success' | 'failed' | 'skipped' | 'canceled' }
+   176→  neededResults: Record<string, string>;
+   177→}
+   178→
+   179→/**
+   180→ * Evaluate a stage `if` condition.
+   181→ *
+   182→ * Supported syntax:
+   183→ *   • `always()`                    — always true
+   184→ *   • `success()`                   — true if all needed stages succeeded
+   185→ *   • `failure()`                   — true if any needed stage failed/canceled
+   186→ *   • `matrix.KEY == 'value'`       — string equality
+   187→ *   • `matrix.KEY != 'value'`       — string inequality
+   188→ *   • `matrix.KEY == "value"`       — string equality (double quotes)
+   189→ *   • `matrix.KEY != "value"`       — string inequality (double quotes)
+   190→ *   • Combinations via `&&`, `||`, `!`, and parentheses.
+   191→ *
+   192→ * Returns false on any parse error (conservative — skip the stage).
+   193→ */
+   194→export function evaluateCondition(expr: string, ctx: ConditionContext): boolean {
+   195→  if (!expr || expr.trim() === '') return true;
+   196→  const allSuccess = Object.values(ctx.neededResults).every(s => s === 'success');
+   197→  const anyFailed = Object.values(ctx.neededResults).some(s => s === 'failed' || s === 'canceled');
+   198→
+   199→  let s = expr.trim();
+   200→  // Function-call replacements.
+   201→  s = s.replace(/\balways\s*\(\s*\)/g, 'true');
+   202→  s = s.replace(/\bsuccess\s*\(\s*\)/g, allSuccess ? 'true' : 'false');
+   203→  s = s.replace(/\bfailure\s*\(\s*\)/g, anyFailed ? 'true' : 'false');
+   204→  // matrix.KEY == 'value' / != 'value' (single or double quotes).
+   205→  s = s.replace(
+   206→    /\bmatrix\.(\w+)\s*(==|!=)\s*'([^']*)'/g,
+   207→    (_, key, op, val) => (op === '==' ? ((ctx.matrix[key] ?? '') === val) : ((ctx.matrix[key] ?? '') !== val)) ? 'true' : 'false',
+   208→  );
+   209→  s = s.replace(
+   210→    /\bmatrix\.(\w+)\s*(==|!=)\s*"([^"]*)"/g,
+   211→    (_, key, op, val) => (op === '==' ? ((ctx.matrix[key] ?? '') === val) : ((ctx.matrix[key] ?? '') !== val)) ? 'true' : 'false',
+   212→  );
+   213→  // Any remaining matrix.KEY reference → replace with its value (quoted) so
+   214→  // bare references work too (treated as truthy non-empty string).
+   215→  s = s.replace(/\bmatrix\.(\w+)/g, (_, key) => (ctx.matrix[key] ?? '') ? 'true' : 'false');
+   216→
+   217→  return evalBoolean(s);
+   218→}
+   219→
+   220→/**
+   221→ * Evaluate a reduced boolean expression containing only `true`, `false`,
+   222→ * `&&`, `||`, `!`, `(`, `)`, and whitespace. Hand-written recursive descent
+   223→ * parser — no `eval` / `Function` constructor, so no code injection risk.
+   224→ */
+   225→function evalBoolean(s: string): boolean {
+   226→  const tokens: string[] = [];
+   227→  let i = 0;
+   228→  while (i < s.length) {
+   229→    const c = s[i];
+   230→    if (c === ' ' || c === '\t' || c === '\n' || c === '\r') { i++; continue; }
+   231→    if (c === '(' || c === ')') { tokens.push(c); i++; continue; }
+   232→    if (c === '!') { tokens.push('!'); i++; continue; }
+   233→    if (c === '&' && s[i + 1] === '&') { tokens.push('&&'); i += 2; continue; }
+   234→    if (c === '|' && s[i + 1] === '|') { tokens.push('||'); i += 2; continue; }
+   235→    if (s.slice(i, i + 4) === 'true') { tokens.push('true'); i += 4; continue; }
+   236→    if (s.slice(i, i + 5) === 'false') { tokens.push('false'); i += 5; continue; }
+   237→    // Unknown token — bail.
+   238→    return false;
+   239→  }
+   240→  let pos = 0;
+   241→  const peek = (): string | undefined => tokens[pos];
+   242→  const consume = (): string | undefined => tokens[pos++];
+   243→  function parseOr(): boolean {
+   244→    let v = parseAnd();
+   245→    while (peek() === '||') { consume(); v = parseAnd() || v; }
+   246→    return v;
+   247→  }
+   248→  function parseAnd(): boolean {
+   249→    let v = parseNot();
+   250→    while (peek() === '&&') { consume(); v = parseNot() && v; }
+   251→    return v;
+   252→  }
+   253→  function parseNot(): boolean {
+   254→    if (peek() === '!') { consume(); return !parseNot(); }
+   255→    return parsePrimary();
+   256→  }
+   257→  function parsePrimary(): boolean {
+   258→    const t = consume();
+   259→    if (t === 'true') return true;
+   260→    if (t === 'false') return false;
+   261→    if (t === '(') {
+   262→      const v = parseOr();
+   263→      if (peek() === ')') consume();
+   264→      return v;
+   265→    }
+   266→    return false;
+   267→  }
+   268→  return parseOr();
+   269→}
+   270→
+   271→// ---------------------------------------------------------------------------
+   272→// Matrix substitution — uses the shared `substituteMatrix` from
+   273→// `./matrix` so behaviour is identical to engine.ts and
+   274→// custom-workflow.ts. (Previously each module had its own copy.)
+   275→// ---------------------------------------------------------------------------
+   276→
+   277→function substituteMatrixInRecord(rec: Record<string, string> | undefined, matrix: MatrixRow): Record<string, string> {
+   278→  if (!rec) return {};
+   279→  const out: Record<string, string> = {};
+   280→  for (const [k, v] of Object.entries(rec)) out[k] = substituteMatrix(v, matrix);
+   281→  return out;
+   282→}
+   283→
+   284→// ---------------------------------------------------------------------------
+   285→// CRUD
+   286→// ---------------------------------------------------------------------------
+   287→
+   288→export async function createPipeline(
+   289→  projectId: string,
+   290→  name: string,
+   291→  definition: PipelineDefinition,
+   292→): Promise<{ id: string }> {
+   293→  const validation = validatePipelineDefinition(definition);
+   294→  if (!validation.valid) {
+   295→    throw new Error(`Invalid pipeline: ${validation.errors.join(' ')}`);
+   296→  }
+   297→  const pipeline = await db.pipeline.create({
+   298→    data: {
+   299→      projectId,
+   300→      name,
+   301→      stages: JSON.stringify(definition.stages),
+   302→      config: JSON.stringify(definition.config ?? {}),
+   303→    },
+   304→  });
+   305→  return { id: pipeline.id };
+   306→}
+   307→
+   308→export async function listPipelines(projectId: string): Promise<Array<{
+   309→  id: string;
+   310→  name: string;
+   311→  stages: string;
+   312→  config: string;
+   313→  createdAt: Date;
+   314→  updatedAt: Date;
+   315→}>> {
+   316→  return db.pipeline.findMany({
+   317→    where: { projectId },
+   318→    orderBy: { createdAt: 'desc' },
+   319→  });
+   320→}
+   321→
+   322→export async function getPipeline(pipelineId: string): Promise<{
+   323→  id: string;
+   324→  projectId: string;
+   325→  name: string;
+   326→  stages: string;
+   327→  config: string;
+   328→  createdAt: Date;
+   329→  updatedAt: Date;
+   330→  runs: Array<{
+   331→    id: string;
+   332→    status: string;
+   333→    startedAt: Date;
+   334→    finishedAt: Date | null;
+   335→    trigger: string;
+   336→  }>;
+   337→} | null> {
+   338→  const pipeline = await db.pipeline.findUnique({
+   339→    where: { id: pipelineId },
+   340→    include: {
+   341→      runs: {
+   342→        orderBy: { startedAt: 'desc' },
+   343→        take: 25,
+   344→      },
+   345→    },
+   346→  });
+   347→  if (!pipeline) return null;
+   348→  return pipeline;
+   349→}
+   350→
+   351→export async function deletePipeline(projectId: string, pipelineId: string): Promise<void> {
+   352→  // Verify ownership before deleting.
+   353→  const pipeline = await db.pipeline.findFirst({
+   354→    where: { id: pipelineId, projectId },
+   355→  });
+   356→  if (!pipeline) throw new Error('Pipeline not found');
+   357→  await db.pipeline.delete({ where: { id: pipelineId } });
+   358→}
+   359→
+   360→export async function listPipelineRuns(projectId: string, limit = 50): Promise<Array<{
+   361→  id: string;
+   362→  pipelineId: string;
+   363→  projectId: string;
+   364→  status: string;
+   365→  startedAt: Date;
+   366→  finishedAt: Date | null;
+   367→  trigger: string;
+   368→}>> {
+   369→  return db.pipelineRun.findMany({
+   370→    where: { projectId },
+   371→    orderBy: { startedAt: 'desc' },
+   372→    take: limit,
+   373→  });
+   374→}
+   375→
+   376→// ============================================================
+   377→// Custom workflows (moved from `./custom-workflow` in R-4)
+   378→// ============================================================
+   379→// A CustomWorkflow is a JSON document authored by the project owner
+   380→// describing a list of shell steps (with per-step env, retry, timeout,
+   381→// cache, working dir, test-report capture, and continueOnError). It is
+   382→// the lightweight alternative to defining a multi-stage Pipeline — in
+   383→// fact, a custom workflow IS a single-stage pipeline. Storage: a custom
+   384→// workflow is stored as a Pipeline with a single 'custom' stage and the
+   385→// full CustomWorkflow JSON in the pipeline's `config.customWorkflow`
+   386→// field. The pipeline executor detects this and calls `runCustomWorkflow`
+   387→// directly (it's now in the same file) instead of `startRunExtended`.
+   388→//
+   389→// Custom workflows share the engine's SSE event bus (via `subscribe`,
+   390→// `emit`, `appendLog`, `finishRun`) so the existing
+   391→// `/api/forge/runs/[id]/events` SSE route picks them up automatically.
+   392→// ------------------------------------------------------------
+   393→
+   394→// Allowed interpreter languages for custom workflow steps.
+   395→const STEP_LANGUAGES: readonly CustomWorkflowStepLanguage[] = ['bash', 'node', 'python', 'ruby'] as const;
+   396→
+   397→/**
+   398→ * Coerce an unknown value into a valid CustomWorkflowStepLanguage, or throw.
+   399→ * Returns 'bash' when the value is absent (undefined/null). Throws a clear
+   400→ * error when the value is present but not one of the allowed languages.
+   401→ */
+   402→function coerceStepLanguage(raw: unknown, stepIndex: number): CustomWorkflowStepLanguage {
+   403→  if (raw === undefined || raw === null) return 'bash';
+   404→  if (typeof raw !== 'string') {
+   405→    throw new Error(`Step ${stepIndex} has invalid "language" (expected string, got ${typeof raw}).`);
+   406→  }
+   407→  if (!(STEP_LANGUAGES as readonly string[]).includes(raw)) {
+   408→    throw new Error(`Step ${stepIndex} has invalid "language" "${raw}". Allowed: ${STEP_LANGUAGES.join(', ')}.`);
+   409→  }
+   410→  return raw as CustomWorkflowStepLanguage;
+   411→}
+   412→
+   413→// ---------------------------------------------------------------------------
+   414→// Parsing + validation
+   415→// ---------------------------------------------------------------------------
+   416→
+   417→/**
+   418→ * Parse a JSON string into a CustomWorkflow. Throws on invalid input.
+   419→ */
+   420→export function parseCustomWorkflow(json: string): CustomWorkflow {
+   421→  let raw: unknown;
+   422→  try {
+   423→    raw = JSON.parse(json);
+   424→  } catch (err) {
+   425→    throw new Error(`Custom workflow is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
+   426→  }
+   427→  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+   428→    throw new Error('Custom workflow must be a JSON object.');
+   429→  }
+   430→  const obj = raw as Record<string, unknown>;
+   431→  if (typeof obj.name !== 'string' || obj.name.trim() === '') {
+   432→    throw new Error('Custom workflow must have a non-empty "name" string.');
+   433→  }
+   434→  if (!Array.isArray(obj.steps) || obj.steps.length === 0) {
+   435→    throw new Error('Custom workflow must have a non-empty "steps" array.');
+   436→  }
+   437→  const steps: CustomWorkflowStep[] = [];
+   438→  for (let i = 0; i < obj.steps.length; i++) {
+   439→    const s = obj.steps[i] as Record<string, unknown>;
+   440→    if (typeof s !== 'object' || s === null) {
+   441→      throw new Error(`Step ${i} must be an object.`);
+   442→    }
+   443→    if (typeof s.name !== 'string' || s.name.trim() === '') {
+   444→      throw new Error(`Step ${i} must have a non-empty "name".`);
+   445→    }
+   446→    if (typeof s.run !== 'string' || s.run.trim() === '') {
+   447→      throw new Error(`Step ${i} must have a non-empty "run" command.`);
+   448→    }
+   449→    const step: CustomWorkflowStep = { name: s.name, run: s.run };
+   450→    // Per-step interpreter language (defaults to 'bash' when absent).
+   451→    const language = coerceStepLanguage(s.language, i);
+   452→    if (language !== 'bash') step.language = language;
+   453→    if (typeof s.workingDir === 'string') step.workingDir = s.workingDir;
+   454→    if (s.env && typeof s.env === 'object') {
+   455→      step.env = Object.fromEntries(
+   456→        Object.entries(s.env as Record<string, unknown>).filter(([, v]) => typeof v === 'string'),
+   457→      ) as Record<string, string>;
+   458→    }
+   459→    if (typeof s.retry === 'number') step.retry = s.retry;
+   460→    if (typeof s.timeoutMs === 'number') step.timeoutMs = s.timeoutMs;
+   461→    if (s.cache && typeof s.cache === 'object') {
+   462→      const c = s.cache as Record<string, unknown>;
+   463→      if (typeof c.key === 'string' && Array.isArray(c.paths)) {
+   464→        step.cache = {
+   465→          key: c.key,
+   466→          paths: (c.paths as unknown[]).filter((p): p is string => typeof p === 'string'),
+   467→          restore: c.restore !== false,
+   468→          save: c.save !== false,
+   469→        };
+   470→      }
+   471→    }
+   472→    if (s.testReport && typeof s.testReport === 'object') {
+   473→      const tr = s.testReport as Record<string, unknown>;
+   474→      if (typeof tr.format === 'string' && typeof tr.path === 'string') {
+   475→        step.testReport = {
+   476→          format: tr.format as 'junit' | 'json' | 'tap',
+   477→          path: tr.path,
+   478→        };
+   479→      }
+   480→    }
+   481→    if (typeof s.continueOnError === 'boolean') step.continueOnError = s.continueOnError;
+   482→    steps.push(step);
+   483→  }
+   484→  const workflow: CustomWorkflow = { name: obj.name, steps };
+   485→  if (typeof obj.description === 'string') workflow.description = obj.description;
+   486→  if (obj.matrix && typeof obj.matrix === 'object') {
+   487→    const m = obj.matrix as Record<string, unknown>;
+   488→    if (Array.isArray(m.dimensions)) {
+   489→      workflow.matrix = {
+   490→        dimensions: (m.dimensions as unknown[])
+   491→          .filter((d): d is Record<string, unknown> => typeof d === 'object' && d !== null)
+   492→          .map(d => ({
+   493→            key: String(d.key ?? ''),
+   494→            values: Array.isArray(d.values)
+   495→              ? (d.values as unknown[]).filter((v): v is string => typeof v === 'string')
+   496→              : [],
+   497→          }))
+   498→          .filter(d => d.key !== ''),
+   499→        exclude: Array.isArray(m.exclude) ? (m.exclude as MatrixRow[]) : undefined,
+   500→        include: Array.isArray(m.include) ? (m.include as MatrixRow[]) : undefined,
+   501→      };
+   502→    }
+   503→  }
+   504→  if (typeof obj.retry === 'number') workflow.retry = obj.retry;
+   505→  if (typeof obj.timeoutMs === 'number') workflow.timeoutMs = obj.timeoutMs;
+   506→  if (typeof obj.requiresApproval === 'boolean') workflow.requiresApproval = obj.requiresApproval;
+   507→  if (Array.isArray(obj.secrets)) {
+   508→    workflow.secrets = (obj.secrets as unknown[]).filter((s): s is string => typeof s === 'string');
+   509→  }
+   510→  if (obj.env && typeof obj.env === 'object') {
+   511→    workflow.env = Object.fromEntries(
+   512→      Object.entries(obj.env as Record<string, unknown>).filter(([, v]) => typeof v === 'string'),
+   513→    ) as Record<string, string>;
+   514→  }
+   515→  return workflow;
+   516→}
+   517→
+   518→/**
+   519→ * Validate a CustomWorkflow object. Returns `{ valid, errors }`.
+   520→ */
+   521→export function validateCustomWorkflow(workflow: CustomWorkflow): { valid: boolean; errors: string[] } {
+   522→  const errors: string[] = [];
+   523→  if (!workflow.name || workflow.name.trim() === '') {
+   524→    errors.push('Custom workflow must have a non-empty "name".');
+   525→  }
+   526→  if (!workflow.steps || workflow.steps.length === 0) {
+   527→    errors.push('Custom workflow must have at least one step.');
+   528→  } else {
+   529→    const names = new Set<string>();
+   530→    for (let i = 0; i < workflow.steps.length; i++) {
+   531→      const s = workflow.steps[i]!;
+   532→      if (!s.name || s.name.trim() === '') {
+   533→        errors.push(`Step ${i} must have a non-empty "name".`);
+   534→        continue;
+   535→      }
+   536→      if (names.has(s.name)) {
+   537→        errors.push(`Duplicate step name: "${s.name}".`);
+   538→      }
+   539→      names.add(s.name);
+   540→      if (!s.run || s.run.trim() === '') {
+   541→        errors.push(`Step "${s.name}" must have a non-empty "run" command.`);
+   542→      }
+   543→      if (s.language !== undefined && !(STEP_LANGUAGES as readonly string[]).includes(s.language)) {
+   544→        errors.push(`Step "${s.name}" has invalid "language" "${s.language}". Allowed: ${STEP_LANGUAGES.join(', ')}.`);
+   545→      }
+   546→    }
+   547→  }
+   548→  if (workflow.matrix?.dimensions) {
+   549→    for (const dim of workflow.matrix.dimensions) {
+   550→      if (!dim.key || dim.key.trim() === '') {
+   551→        errors.push('Matrix dimension must have a non-empty "key".');
+   552→      }
+   553→      if (!dim.values || dim.values.length === 0) {
+   554→        errors.push(`Matrix dimension "${dim.key}" must have at least one value.`);
+   555→      }
+   556→    }
+   557→  }
+   558→  return { valid: errors.length === 0, errors };
+   559→}
+   560→
+   561→// ---------------------------------------------------------------------------
+   562→// Storage
+   563→// ---------------------------------------------------------------------------
+   564→
+   565→/**
+   566→ * Save a custom workflow as a Pipeline with a single 'custom' stage.
+   567→ * The full CustomWorkflow JSON is stored in the pipeline's config field
+   568→ * under `customWorkflow`, and the pipeline executor dispatches to
+   569→ * `runCustomWorkflow` instead of `startRunExtended`.
+   570→ */
+   571→export async function saveCustomWorkflow(
+   572→  projectId: string,
+   573→  name: string,
+   574→  workflow: CustomWorkflow,
+   575→): Promise<{ id: string }> {
+   576→  const validation = validateCustomWorkflow(workflow);
+   577→  if (!validation.valid) {
+   578→    throw new Error(`Invalid custom workflow: ${validation.errors.join(' ')}`);
+   579→  }
+   580→  // Build a minimal PipelineDefinition with a single 'custom' stage.
+   581→  const stages = [
+   582→    {
+   583→      id: 'custom',
+   584→      name: workflow.name,
+   585→      workflow: 'custom',
+   586→      needs: [] as string[],
+   587→      ...(workflow.matrix ? { matrix: workflow.matrix } : {}),
+   588→      ...(workflow.retry !== undefined ? { retry: workflow.retry } : {}),
+   589→      ...(workflow.timeoutMs !== undefined ? { timeoutMs: workflow.timeoutMs } : {}),
+   590→      ...(workflow.requiresApproval ? { requiresApproval: true } : {}),
+   591→      ...(workflow.secrets ? { secrets: workflow.secrets } : {}),
+   592→      ...(workflow.env ? { env: workflow.env } : {}),
+   593→    },
+   594→  ];
+   595→  const config = { customWorkflow: workflow };
+   596→  const pipeline = await db.pipeline.create({
+   597→    data: {
+   598→      projectId,
+   599→      name,
+   600→      stages: JSON.stringify(stages),
+   601→      config: JSON.stringify(config),
+   602→    },
+   603→  });
+   604→  return { id: pipeline.id };
+   605→}
+   606→
+   607→// ---------------------------------------------------------------------------
+   608→// Custom-workflow execution
+   609→// ---------------------------------------------------------------------------
+   610→
+   611→export interface RunCustomWorkflowOptions {
+   612→  trigger?: 'manual' | 'auto' | 'webhook' | 'cron' | 'pipeline';
+   613→  matrixValues?: MatrixRow;
+   614→  pipelineRunId?: string;
+   615→  stageId?: string;
+   616→  label?: string;
+   617→}
+   618→
+   619→/**
+   620→ * Run a CustomWorkflow. Creates a Run row with `workflow: 'custom'` and
+   621→ * executes the steps directly (without going through `startRunExtended`,
+   622→ * which only knows about predefined workflows). Shares the engine's SSE
+   623→ * event bus so the existing `/api/forge/runs/[id]/events` route picks
+   624→ * it up.
+   625→ *
+   626→ * Returns immediately with `{ runId }`; execution continues in the
+   627→ * background.
+   628→ */
+   629→export async function runCustomWorkflow(
+   630→  projectId: string,
+   631→  workflow: CustomWorkflow,
+   632→  options: RunCustomWorkflowOptions = {},
+   633→): Promise<{ runId: string }> {
+   634→  const project = await db.project.findUnique({ where: { id: projectId } });
+   635→  if (!project) throw new Error(`Project ${projectId} not found`);
+   636→
+   637→  const run = await db.run.create({
+   638→    data: {
+   639→      projectId,
+   640→      workflow: 'custom',
+   641→      status: 'running',
+   642→      trigger: options.trigger ?? 'manual',
+   643→      startedAt: new Date(),
+   644→      matrixValues: options.matrixValues ? JSON.stringify(options.matrixValues) : null,
+   645→      pipelineRunId: options.pipelineRunId,
+   646→      stageId: options.stageId,
+   647→      label: options.label ?? workflow.name,
+   648→    },
+   649→  });
+   650→
+   651→  emit({ type: 'status', runId: run.id, status: 'running' });
+   652→
+   653→  // Fire-and-forget execution.
+   654→  void executeCustomSteps(run.id, project.extractedPath, workflow, projectId, options);
+   655→
+   656→  return { runId: run.id };
+   657→}
+   658→
+   659→async function executeCustomSteps(
+   660→  runId: string,
+   661→  projectRoot: string,
+   662→  workflow: CustomWorkflow,
+   663→  projectId: string,
+   664→  options: RunCustomWorkflowOptions,
+   665→): Promise<void> {
+   666→  const startedAt = Date.now();
+   667→  try {
+   668→    // Resolve secrets (workflow-level).
+   669→    const secretKeys = new Set<string>(workflow.secrets ?? []);
+   670→    const allSecrets = secretKeys.size > 0
+   671→      ? await getSecrets(projectId, Array.from(secretKeys))
+   672→      : {};
+   673→
+   674→    // Merge workflow-level env + matrix-derived env.
+   675→    const workflowEnv: Record<string, string> = { ...(workflow.env ?? {}) };
+   676→    if (options.matrixValues) {
+   677→      for (const [k, v] of Object.entries(options.matrixValues)) {
+   678→        workflowEnv[`MATRIX_${k.toUpperCase()}`] = v;
+   679→      }
+   680→    }
+   681→
+   682→    // Run each step.
+   683→    let lastExitCode = 0;
+   684→    for (const step of workflow.steps) {
+   685→      // Matrix substitution in step command + env.
+   686→      const matrix = options.matrixValues ?? {};
+   687→      const stepCommand = substituteMatrix(step.run, matrix);
+   688→      const stepEnv: Record<string, string> = {
+   689→        ...workflowEnv,
+   690→        ...substituteMatrixInRecord(step.env ?? {}, matrix),
+   691→      };
+   692→
+   693→      // Cache restore (per-step).
+   694→      if (step.cache?.restore) {
+   695→        const hit = await hasCache(projectId, step.cache.key);
+   696→        if (hit) {
+   697→          const restored = await restoreCache(projectId, step.cache.key);
+   698→          if (restored.hit) {
+   699→            await appendLog(runId, 'system', `💾 Cache hit: ${step.cache.key} (${formatBytes(restored.size ?? 0)})`);
+   700→          }
+   701→        } else {
+   702→          await appendLog(runId, 'system', `💾 Cache miss: ${step.cache.key}`);
+   703→        }
+   704→      }
+   705→
+   706→      // Run with per-step retry.
+   707→      const maxAttempts = (step.retry ?? 0) + 1;
+   708→      let attempt = 0;
+   709→      let stepExit = 1;
+   710→      while (attempt < maxAttempts) {
+   711→        if (attempt > 0) {
+   712→          emit({ type: 'retry', runId, retryAttempt: attempt });
+   713→          await appendLog(runId, 'system', `↻ Retry ${attempt}/${maxAttempts - 1} for: ${step.name}`);
+   714→        }
+   715→        await appendLog(runId, 'system', `▶ ${step.name}`);
+   716→        // Pass the step with `run` already matrix-substituted so the
+   717→        // executeStepCommand helper can write the script body to a temp
+   718→        // file when language is node/python/ruby.
+   719→        stepExit = await executeStepCommand(
+   720→          runId,
+   721→          { ...step, run: stepCommand },
+   722→          step.workingDir ? path.join(projectRoot, step.workingDir) : projectRoot,
+   723→          { secrets: allSecrets, extraEnv: stepEnv, timeoutMs: step.timeoutMs, projectId },
+   724→        );
+   725→        if (stepExit === 0) break;
+   726→        attempt++;
+   727→      }
+   728→
+   729→      // Cache save (per-step) — even on failure (partial cache is useful).
+   730→      if (step.cache?.save) {
+   731→        try {
+   732→          const { size } = await saveCache(projectId, step.cache.key, step.cache.key, step.cache.paths);
+   733→          await appendLog(runId, 'system', `💾 Cache saved: ${step.cache.key} (${formatBytes(size)})`);
+   734→        } catch (err) {
+   735→          await appendLog(runId, 'system', `Cache save failed: ${err instanceof Error ? err.message : String(err)}`);
+   736→        }
+   737→      }
+   738→
+   739→      // Test report capture (per-step).
+   740→      if (step.testReport) {
+   741→        try {
+   742→          const reportPath = path.join(projectRoot, step.testReport.path);
+   743→          if (fs.existsSync(reportPath)) {
+   744→            const content = fs.readFileSync(reportPath, 'utf-8');
+   745→            const { parseJUnit, parseJSONReport, parseTAP } = await import('./test-report');
+   746→            const report =
+   747→              step.testReport.format === 'junit' ? parseJUnit(content)
+   748→              : step.testReport.format === 'json' ? parseJSONReport(content)
+   749→              : parseTAP(content);
+   750→            await storeTestReport(runId, report);
+   751→            await appendLog(runId, 'system', `📊 Test report: ${report.passed} passed, ${report.failed} failed, ${report.skipped} skipped (${report.total} total).`);
+   752→          }
+
+[showing lines 53-752 of 1352; use offset=753 with limit to continue reading]

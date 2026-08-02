@@ -1,0 +1,715 @@
+     1→"use client";
+     2→
+     3→// ============================================================
+     4→// Forge — Experiments Lab
+     5→// ============================================================
+     6→// A sandboxed page where hard, monitored experiments run on
+     7→// Forge itself to discover development breakthroughs. Each
+     8→// experiment has a hypothesis, runs in isolation with hard
+     9→// timeouts + output caps, and produces a verdict:
+    10→//   BREAKTHROUGH → can be promoted to a permanent workflow
+    11→//   NO_CHANGE    → ran fine, no breakthrough
+    12→//   REGRESSION   → made things worse
+    13→//
+    14→// Safety rails are enforced in the engine (engine.ts). The UI
+    15→// only triggers runs and displays results — it cannot bypass
+    16→// the sandbox.
+    17→// ============================================================
+    18→
+    19→import { useState, useCallback } from "react";
+    20→import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+    21→import {
+    22→  FlaskConical,
+    23→  Play,
+    24→  Loader2,
+    25→  CheckCircle2,
+    26→  XCircle,
+    27→  MinusCircle,
+    28→  TrendingUp,
+    29→  AlertTriangle,
+    30→  Sparkles,
+    31→  Trophy,
+    32→  Clock,
+    33→  ChevronDown,
+    34→  ChevronRight,
+    35→  Rocket,
+    36→  Shield,
+    37→  Brain,
+    38→  Swords,
+    39→  GitBranch,
+    40→  Activity,
+    41→} from "lucide-react";
+    42→import { cn } from "@/lib/utils";
+    43→import {
+    44→  Card,
+    45→  CardContent,
+    46→  CardHeader,
+    47→  CardTitle,
+    48→  CardDescription,
+    49→} from "@/components/ui/card";
+    50→import { Button } from "@/components/ui/button";
+    51→import { Badge } from "@/components/ui/badge";
+    52→import { Progress } from "@/components/ui/progress";
+    53→import { ScrollArea } from "@/components/ui/scroll-area";
+    54→import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+    55→import { toast } from "sonner";
+    56→
+    57→// ---------------------------------------------------------------------------
+    58→// Types — mirror the API response shapes
+    59→// ---------------------------------------------------------------------------
+    60→
+    61→type Verdict = "BREAKTHROUGH" | "NO_CHANGE" | "REGRESSION";
+    62→type Category = "self-improvement" | "tournament" | "synthesis" | "adversarial" | "recursive";
+    63→
+    64→interface LatestRun {
+    65→  id: string;
+    66→  status: string;
+    67→  verdict: Verdict | null;
+    68→  verdictReason: string | null;
+    69→  promoted: boolean;
+    70→  startedAt: string;
+    71→  completedAt: string | null;
+    72→  metrics: string | null;
+    73→}
+    74→
+    75→interface ExperimentListItem {
+    76→  slug: string;
+    77→  name: string;
+    78→  category: Category;
+    79→  hypothesis: string;
+    80→  procedure: string;
+    81→  dangerLevel: "safe" | "moderate" | "aggressive";
+    82→  dbId: string | null;
+    83→  totalRuns: number;
+    84→  latestRun: LatestRun | null;
+    85→}
+    86→
+    87→interface ExperimentsResponse {
+    88→  experiments: ExperimentListItem[];
+    89→  stats: { totalExperiments: number; byCategory: Record<string, number> };
+    90→  verdictCounts: Record<string, number>;
+    91→  promotedCount: number;
+    92→}
+    93→
+    94→interface RunDetail {
+    95→  run: {
+    96→    id: string;
+    97→    status: string;
+    98→    verdict: Verdict | null;
+    99→    verdictReason: string | null;
+   100→    promoted: boolean;
+   101→    promotedWorkflowId: string | null;
+   102→    promotedPresetId: string | null;
+   103→    startedAt: string;
+   104→    completedAt: string | null;
+   105→    metrics: Record<string, number | string | boolean> | null;
+   106→    evidence: { summary: string; steps: Array<{ step: string; detail: unknown; t?: number }> } | null;
+   107→  };
+   108→  experiment: {
+   109→    slug: string;
+   110→    name: string;
+   111→    category: Category;
+   112→    hypothesis: string;
+   113→    procedure: string;
+   114→    dangerLevel: string;
+   115→  };
+   116→}
+   117→
+   118→// ---------------------------------------------------------------------------
+   119→// Category metadata
+   120→// ---------------------------------------------------------------------------
+   121→
+   122→const CATEGORY_META: Record<Category, { icon: typeof Brain; label: string; color: string; desc: string }> = {
+   123→  "self-improvement": {
+   124→    icon: TrendingUp,
+   125→    label: "Self-Improvement",
+   126→    color: "text-emerald-600 dark:text-emerald-400",
+   127→    desc: "Can Forge's AI generate a faster version of an existing script?",
+   128→  },
+   129→  tournament: {
+   130→    icon: Swords,
+   131→    label: "Tournament",
+   132→    color: "text-amber-600 dark:text-amber-400",
+   133→    desc: "Generate the same tool in 3 languages, benchmark, pick the winner.",
+   134→  },
+   135→  synthesis: {
+   136→    icon: Sparkles,
+   137→    label: "Synthesis",
+   138→    color: "text-violet-600 dark:text-violet-400",
+   139→    desc: "Fill a capability gap by generating a tool from a description.",
+   140→  },
+   141→  adversarial: {
+   142→    icon: Shield,
+   143→    label: "Adversarial",
+   144→    color: "text-rose-600 dark:text-rose-400",
+   145→    desc: "Generate malformed inputs, find crashes, synthesize a hardened version.",
+   146→  },
+   147→  recursive: {
+   148→    icon: GitBranch,
+   149→    label: "Recursive",
+   150→    color: "text-sky-600 dark:text-sky-400",
+   151→    desc: "Chain AI-generated scripts N levels deep, feed output → input.",
+   152→  },
+   153→};
+   154→
+   155→const VERDICT_META: Record<Verdict, { icon: typeof CheckCircle2; label: string; color: string; bg: string }> = {
+   156→  BREAKTHROUGH: {
+   157→    icon: Trophy,
+   158→    label: "Breakthrough",
+   159→    color: "text-emerald-700 dark:text-emerald-300",
+   160→    bg: "bg-emerald-500/10 border-emerald-500/30",
+   161→  },
+   162→  NO_CHANGE: {
+   163→    icon: MinusCircle,
+   164→    label: "No change",
+   165→    color: "text-muted-foreground",
+   166→    bg: "bg-muted/40 border-border",
+   167→  },
+   168→  REGRESSION: {
+   169→    icon: XCircle,
+   170→    label: "Regression",
+   171→    color: "text-rose-700 dark:text-rose-300",
+   172→    bg: "bg-rose-500/10 border-rose-500/30",
+   173→  },
+   174→};
+   175→
+   176→const DANGER_META: Record<string, { label: string; color: string }> = {
+   177→  safe: { label: "Safe", color: "text-emerald-600 dark:text-emerald-400" },
+   178→  moderate: { label: "Moderate", color: "text-amber-600 dark:text-amber-400" },
+   179→  aggressive: { label: "Aggressive", color: "text-rose-600 dark:text-rose-400" },
+   180→};
+   181→
+   182→// ---------------------------------------------------------------------------
+   183→// Main component
+   184→// ---------------------------------------------------------------------------
+   185→
+   186→export function ExperimentsLab() {
+   187→  const queryClient = useQueryClient();
+   188→  const [expandedSlug, setExpandedSlug] = useState<string | null>(null);
+   189→  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+   190→
+   191→  const { data, isLoading } = useQuery<ExperimentsResponse>({
+   192→    queryKey: ["experiments"],
+   193→    queryFn: async () => {
+   194→      const r = await fetch("/api/forge/experiments");
+   195→      if (!r.ok) throw new Error("Failed to load experiments");
+   196→      return r.json();
+   197→    },
+   198→    refetchInterval: 5000,
+   199→  });
+   200→
+   201→  const runMutation = useMutation({
+   202→    mutationFn: async (slug: string) => {
+   203→      const r = await fetch(`/api/forge/experiments/${slug}/run`, { method: "POST" });
+   204→      if (!r.ok) {
+   205→        const e = await r.json().catch(() => ({}));
+   206→        throw new Error(e.error ?? "Run failed");
+   207→      }
+   208→      return r.json() as Promise<{ runId: string; verdict: Verdict | null; status: string }>;
+   209→    },
+   210→    onSuccess: (result, slug) => {
+   211→      queryClient.invalidateQueries({ queryKey: ["experiments"] });
+   212→      setSelectedRunId(result.runId);
+   213→      setExpandedSlug(slug);
+   214→      if (result.verdict === "BREAKTHROUGH") {
+   215→        toast.success("Breakthrough discovered!", {
+   216→          description: "The experiment found a real improvement. You can promote it.",
+   217→        });
+   218→      } else if (result.verdict === "REGRESSION") {
+   219→        toast.error("Experiment regressed", {
+   220→          description: result.status === "timeout" ? "The experiment timed out." : "See the run details.",
+   221→        });
+   222→      } else {
+   223→        toast.info("Experiment completed", { description: "No breakthrough this time." });
+   224→      }
+   225→    },
+   226→    onError: (err: Error) => {
+   227→      toast.error("Experiment failed", { description: err.message });
+   228→    },
+   229→  });
+   230→
+   231→  const promoteMutation = useMutation({
+   232→    mutationFn: async (runId: string) => {
+   233→      const r = await fetch(`/api/forge/experiments/runs/${runId}?action=promote`, { method: "POST" });
+   234→      if (!r.ok) {
+   235→        const e = await r.json().catch(() => ({}));
+   236→        throw new Error(e.error ?? "Promotion failed");
+   237→      }
+   238→      return r.json();
+   239→    },
+   240→    onSuccess: () => {
+   241→      queryClient.invalidateQueries({ queryKey: ["experiments"] });
+   242→      queryClient.invalidateQueries({ queryKey: ["experiment-run"] });
+   243→      toast.success("Promoted to permanent workflow", {
+   244→        description: "The breakthrough is now a reusable Forge workflow + preset.",
+   245→      });
+   246→    },
+   247→    onError: (err: Error) => toast.error("Promotion failed", { description: err.message }),
+   248→  });
+   249→
+   250→  const totalRuns = data
+   251→    ? data.experiments.reduce((sum, e) => sum + e.totalRuns, 0)
+   252→    : 0;
+   253→  const breakthroughs = data?.verdictCounts.BREAKTHROUGH ?? 0;
+   254→
+   255→  return (
+   256→    <div className="space-y-6">
+   257→      {/* Header */}
+   258→      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+   259→        <div className="flex items-center gap-3">
+   260→          <span className="flex size-10 items-center justify-center rounded-lg bg-violet-500/10 text-violet-600 dark:text-violet-400">
+   261→            <FlaskConical className="size-5" aria-hidden />
+   262→          </span>
+   263→          <div>
+   264→            <h1 className="text-xl font-semibold tracking-tight">Experiments Lab</h1>
+   265→            <p className="text-sm text-muted-foreground">
+   266→              Sandboxed breakthrough discovery — Forge runs hard experiments on itself.
+   267→            </p>
+   268→          </div>
+   269→        </div>
+   270→        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+   271→          <Shield className="size-3.5 text-emerald-500" aria-hidden />
+   272→          <span>Sandboxed · time-capped · output-limited</span>
+   273→        </div>
+   274→      </div>
+   275→
+   276→      {/* Stats row */}
+   277→      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+   278→        <StatCard
+   279→          icon={FlaskConical}
+   280→          label="Experiments"
+   281→          value={data?.stats.totalExperiments ?? 5}
+   282→          color="text-violet-600 dark:text-violet-400"
+   283→        />
+   284→        <StatCard
+   285→          icon={Activity}
+   286→          label="Total runs"
+   287→          value={totalRuns}
+   288→          color="text-sky-600 dark:text-sky-400"
+   289→        />
+   290→        <StatCard
+   291→          icon={Trophy}
+   292→          label="Breakthroughs"
+   293→          value={breakthroughs}
+   294→          color="text-emerald-600 dark:text-emerald-400"
+   295→        />
+   296→        <StatCard
+   297→          icon={Rocket}
+   298→          label="Promoted"
+   299→          value={data?.promotedCount ?? 0}
+   300→          color="text-amber-600 dark:text-amber-400"
+   301→        />
+   302→      </div>
+   303→
+   304→      {/* Breakthrough rate bar */}
+   305→      {data && totalRuns > 0 && (
+   306→        <Card>
+   307→          <CardContent className="p-4">
+   308→            <div className="flex items-center justify-between text-xs text-muted-foreground">
+   309→              <span className="flex items-center gap-1.5">
+   310→                <TrendingUp className="size-3.5" aria-hidden />
+   311→                Breakthrough rate
+   312→              </span>
+   313→              <span className="font-mono">
+   314→                {breakthroughs}/{totalRuns} runs ({Math.round((breakthroughs / totalRuns) * 100)}%)
+   315→              </span>
+   316→            </div>
+   317→            <Progress
+   318→              value={(breakthroughs / totalRuns) * 100}
+   319→              className="mt-2 h-2"
+   320→            />
+   321→            <div className="mt-2 flex flex-wrap gap-2 text-[11px]">
+   322→              {(["BREAKTHROUGH", "NO_CHANGE", "REGRESSION"] as Verdict[]).map((v) => (
+   323→                <Badge
+   324→                  key={v}
+   325→                  variant="outline"
+   326→                  className={cn("gap-1 font-mono", VERDICT_META[v].color)}
+   327→                >
+   328→                  {VERDICT_META[v].label}: {data.verdictCounts[v] ?? 0}
+   329→                </Badge>
+   330→              ))}
+   331→            </div>
+   332→          </CardContent>
+   333→        </Card>
+   334→      )}
+   335→
+   336→      {/* Experiment cards */}
+   337→      <div className="space-y-3">
+   338→        {isLoading ? (
+   339→          <Card>
+   340→            <CardContent className="flex items-center justify-center p-12 text-sm text-muted-foreground">
+   341→              <Loader2 className="mr-2 size-4 animate-spin" aria-hidden />
+   342→              Loading experiments…
+   343→            </CardContent>
+   344→          </Card>
+   345→        ) : (
+   346→          data?.experiments.map((exp) => {
+   347→            const meta = CATEGORY_META[exp.category];
+   348→            const Icon = meta.icon;
+   349→            const isExpanded = expandedSlug === exp.slug;
+   350→            const isRunning = runMutation.isPending && runMutation.variables === exp.slug;
+   351→            const latest = exp.latestRun;
+   352→            const verdict = latest?.verdict;
+   353→            const vMeta = verdict ? VERDICT_META[verdict] : null;
+   354→            const danger = DANGER_META[exp.dangerLevel];
+   355→
+   356→            return (
+   357→              <Card key={exp.slug} className={cn("overflow-hidden transition-shadow", isExpanded && "shadow-md")}>
+   358→                <CardHeader className="pb-3">
+   359→                  <div className="flex items-start justify-between gap-3">
+   360→                    <div className="flex min-w-0 items-start gap-3">
+   361→                      <span className={cn("mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-md bg-muted", meta.color)}>
+   362→                        <Icon className="size-4" aria-hidden />
+   363→                      </span>
+   364→                      <div className="min-w-0">
+   365→                        <CardTitle className="flex flex-wrap items-center gap-2 text-base">
+   366→                          <span className="truncate">{exp.name}</span>
+   367→                          <Badge variant="outline" className="gap-1 text-[10px] font-normal">
+   368→                            <Icon className="size-2.5" aria-hidden />
+   369→                            {meta.label}
+   370→                          </Badge>
+   371→                          <Tooltip>
+   372→                            <TooltipTrigger asChild>
+   373→                              <Badge variant="outline" className={cn("gap-1 text-[10px] font-normal", danger.color)}>
+   374→                                <AlertTriangle className="size-2.5" aria-hidden />
+   375→                                {danger.label}
+   376→                              </Badge>
+   377→                            </TooltipTrigger>
+   378→                            <TooltipContent>Danger level: {exp.dangerLevel}</TooltipContent>
+   379→                          </Tooltip>
+   380→                        </CardTitle>
+   381→                        <CardDescription className="mt-1 line-clamp-2 text-xs">
+   382→                          {exp.hypothesis}
+   383→                        </CardDescription>
+   384→                      </div>
+   385→                    </div>
+   386→                    <div className="flex shrink-0 items-center gap-2">
+   387→                      <Button
+   388→                        size="sm"
+   389→                        variant="default"
+   390→                        disabled={isRunning}
+   391→                        onClick={() => runMutation.mutate(exp.slug)}
+   392→                        className="gap-1.5"
+   393→                      >
+   394→                        {isRunning ? (
+   395→                          <Loader2 className="size-3.5 animate-spin" aria-hidden />
+   396→                        ) : (
+   397→                          <Play className="size-3.5" aria-hidden />
+   398→                        )}
+   399→                        {isRunning ? "Running" : "Run"}
+   400→                      </Button>
+   401→                      <Button
+   402→                        size="sm"
+   403→                        variant="ghost"
+   404→                        onClick={() => setExpandedSlug(isExpanded ? null : exp.slug)}
+   405→                        aria-label={isExpanded ? "Collapse" : "Expand"}
+   406→                      >
+   407→                        {isExpanded ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
+   408→                      </Button>
+   409→                    </div>
+   410→                  </div>
+   411→                </CardHeader>
+   412→
+   413→                {/* Latest verdict strip */}
+   414→                {latest && (
+   415→                  <CardContent className="pb-3 pt-0">
+   416→                    <div className={cn("flex flex-wrap items-center gap-2 rounded-md border px-3 py-2 text-xs", vMeta?.bg ?? "bg-muted/30 border-border")}>
+   417→                      {verdict && (
+   418→                        <span className={cn("flex items-center gap-1 font-medium", vMeta?.color)}>
+   419→                          {(() => {
+   420→                            const VIcon = vMeta!.icon;
+   421→                            return <VIcon className="size-3.5" aria-hidden />;
+   422→                          })()}
+   423→                          {vMeta?.label}
+   424→                        </span>
+   425→                      )}
+   426→                      <span className="text-muted-foreground">
+   427→                        {latest.verdictReason ?? `Status: ${latest.status}`}
+   428→                      </span>
+   429→                      <span className="ml-auto flex items-center gap-2 font-mono text-[10px] text-muted-foreground">
+   430→                        {latest.promoted && (
+   431→                          <Badge variant="outline" className="gap-1 text-[10px] text-emerald-600 dark:text-emerald-400">
+   432→                            <Rocket className="size-2.5" aria-hidden />
+   433→                            Promoted
+   434→                          </Badge>
+   435→                        )}
+   436→                        <Clock className="size-3" aria-hidden />
+   437→                        {new Date(latest.startedAt).toLocaleString()}
+   438→                      </span>
+   439→                    </div>
+   440→                  </CardContent>
+   441→                )}
+   442→
+   443→                {/* Expanded: procedure + runs */}
+   444→                {isExpanded && (
+   445→                  <CardContent className="border-t border-border pt-4">
+   446→                    <div className="grid gap-4 md:grid-cols-2">
+   447→                      <div>
+   448→                        <h4 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+   449→                          Procedure
+   450→                        </h4>
+   451→                        <p className="text-xs leading-relaxed text-foreground/90">{exp.procedure}</p>
+   452→                      </div>
+   453→                      <div>
+   454→                        <h4 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+   455→                          Recent runs
+   456→                        </h4>
+   457→                        <RecentRunsList slug={exp.slug} onSelect={setSelectedRunId} selectedRunId={selectedRunId} />
+   458→                      </div>
+   459→                    </div>
+   460→                  </CardContent>
+   461→                )}
+   462→              </Card>
+   463→            );
+   464→          })
+   465→        )}
+   466→      </div>
+   467→
+   468→      {/* Run detail drawer (inline panel) */}
+   469→      {selectedRunId && (
+   470→        <RunDetailPanel
+   471→          runId={selectedRunId}
+   472→          onClose={() => setSelectedRunId(null)}
+   473→          onPromote={(id) => promoteMutation.mutate(id)}
+   474→          promoting={promoteMutation.isPending}
+   475→        />
+   476→      )}
+   477→    </div>
+   478→  );
+   479→}
+   480→
+   481→// ---------------------------------------------------------------------------
+   482→// Stat card
+   483→// ---------------------------------------------------------------------------
+   484→
+   485→function StatCard({ icon: Icon, label, value, color }: { icon: typeof Brain; label: string; value: number; color: string }) {
+   486→  return (
+   487→    <Card>
+   488→      <CardContent className="flex items-center gap-3 p-3">
+   489→        <span className={cn("flex size-8 items-center justify-center rounded-md bg-muted", color)}>
+   490→          <Icon className="size-4" aria-hidden />
+   491→        </span>
+   492→        <div className="min-w-0">
+   493→          <div className="text-lg font-semibold leading-tight tabular-nums">{value}</div>
+   494→          <div className="truncate text-[11px] text-muted-foreground">{label}</div>
+   495→        </div>
+   496→      </CardContent>
+   497→    </Card>
+   498→  );
+   499→}
+   500→
+   501→// ---------------------------------------------------------------------------
+   502→// Recent runs list (fetches on expand)
+   503→// ---------------------------------------------------------------------------
+   504→
+   505→function RecentRunsList({ slug, onSelect, selectedRunId }: { slug: string; onSelect: (id: string) => void; selectedRunId: string | null }) {
+   506→  const { data, isLoading } = useQuery<{ runs: LatestRun[] }>({
+   507→    queryKey: ["experiment-runs", slug],
+   508→    queryFn: async () => {
+   509→      const r = await fetch(`/api/forge/experiments?slug=${slug}`);
+   510→      if (!r.ok) throw new Error("Failed to load runs");
+   511→      return r.json();
+   512→    },
+   513→    refetchInterval: 4000,
+   514→  });
+   515→
+   516→  if (isLoading) {
+   517→    return <div className="text-xs text-muted-foreground">Loading runs…</div>;
+   518→  }
+   519→  const runs = data?.runs ?? [];
+   520→  if (runs.length === 0) {
+   521→    return (
+   522→      <div className="rounded-md border border-dashed border-border p-3 text-xs text-muted-foreground">
+   523→        No runs yet. Click <span className="font-medium text-foreground">Run</span> to start this experiment.
+   524→      </div>
+   525→    );
+   526→  }
+   527→  return (
+   528→    <ScrollArea className="max-h-64">
+   529→      <div className="space-y-1.5 pr-2">
+   530→        {runs.map((run) => {
+   531→          const vMeta = run.verdict ? VERDICT_META[run.verdict] : null;
+   532→          return (
+   533→            <button
+   534→              key={run.id}
+   535→              type="button"
+   536→              onClick={() => onSelect(run.id)}
+   537→              className={cn(
+   538→                "flex w-full items-center gap-2 rounded-md border px-2.5 py-1.5 text-left text-xs transition-colors hover:bg-accent",
+   539→                selectedRunId === run.id ? "border-primary/40 bg-accent" : "border-border",
+   540→              )}
+   541→            >
+   542→              {run.verdict ? (
+   543→                <span className={cn("flex size-4 shrink-0 items-center justify-center", vMeta?.color)}>
+   544→                  {(() => {
+   545→                    const VIcon = vMeta!.icon;
+   546→                    return <VIcon className="size-3.5" aria-hidden />;
+   547→                  })()}
+   548→                </span>
+   549→              ) : (
+   550→                <Loader2 className="size-3.5 shrink-0 animate-spin text-muted-foreground" aria-hidden />
+   551→              )}
+   552→              <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-muted-foreground">
+   553→                {new Date(run.startedAt).toLocaleTimeString()}
+   554→              </span>
+   555→              {run.promoted && (
+   556→                <Rocket className="size-3 shrink-0 text-emerald-500" aria-hidden />
+   557→              )}
+   558→            </button>
+   559→          );
+   560→        })}
+   561→      </div>
+   562→    </ScrollArea>
+   563→  );
+   564→}
+   565→
+   566→// ---------------------------------------------------------------------------
+   567→// Run detail panel
+   568→// ---------------------------------------------------------------------------
+   569→
+   570→function RunDetailPanel({
+   571→  runId,
+   572→  onClose,
+   573→  onPromote,
+   574→  promoting,
+   575→}: {
+   576→  runId: string;
+   577→  onClose: () => void;
+   578→  onPromote: (id: string) => void;
+   579→  promoting: boolean;
+   580→}) {
+   581→  const { data, isLoading } = useQuery<RunDetail>({
+   582→    queryKey: ["experiment-run", runId],
+   583→    queryFn: async () => {
+   584→      const r = await fetch(`/api/forge/experiments/runs/${runId}`);
+   585→      if (!r.ok) throw new Error("Failed to load run");
+   586→      return r.json();
+   587→    },
+   588→    refetchInterval: 3000,
+   589→  });
+   590→
+   591→  const run = data?.run;
+   592→  const exp = data?.experiment;
+   593→  const verdict = run?.verdict;
+   594→  const vMeta = verdict ? VERDICT_META[verdict] : null;
+   595→  const canPromote = verdict === "BREAKTHROUGH" && !run?.promoted;
+   596→
+   597→  return (
+   598→    <Card className="border-primary/30 shadow-lg">
+   599→      <CardHeader className="pb-3">
+   600→        <div className="flex items-center justify-between gap-2">
+   601→          <div className="flex items-center gap-2">
+   602→            {verdict && vMeta ? (
+   603→              <span className={cn("flex size-8 items-center justify-center rounded-md", vMeta.bg, vMeta.color)}>
+   604→                {(() => {
+   605→                  const VIcon = vMeta.icon;
+   606→                  return <VIcon className="size-4" aria-hidden />;
+   607→                })()}
+   608→              </span>
+   609→            ) : (
+   610→              <Loader2 className="size-5 animate-spin text-muted-foreground" aria-hidden />
+   611→            )}
+   612→            <div>
+   613→              <CardTitle className="text-base">{exp?.name ?? "Run detail"}</CardTitle>
+   614→              <CardDescription className="font-mono text-[10px]">{runId}</CardDescription>
+   615→            </div>
+   616→          </div>
+   617→          <div className="flex items-center gap-2">
+   618→            {canPromote && (
+   619→              <Button
+   620→                size="sm"
+   621→                onClick={() => onPromote(runId)}
+   622→                disabled={promoting}
+   623→                className="gap-1.5"
+   624→              >
+   625→                {promoting ? <Loader2 className="size-3.5 animate-spin" /> : <Rocket className="size-3.5" />}
+   626→                Promote
+   627→              </Button>
+   628→            )}
+   629→            <Button size="sm" variant="ghost" onClick={onClose}>
+   630→              Close
+   631→            </Button>
+   632→          </div>
+   633→        </div>
+   634→      </CardHeader>
+   635→      <CardContent className="space-y-4">
+   636→        {isLoading ? (
+   637→          <div className="flex items-center gap-2 py-8 text-sm text-muted-foreground">
+   638→            <Loader2 className="size-4 animate-spin" /> Loading run…
+   639→          </div>
+   640→        ) : (
+   641→          <>
+   642→            {run?.verdictReason && (
+   643→              <div className={cn("rounded-md border px-3 py-2 text-sm", vMeta?.bg ?? "bg-muted/30 border-border")}>
+   644→                <span className={cn("font-medium", vMeta?.color)}>{vMeta?.label}: </span>
+   645→                <span className="text-foreground/90">{run.verdictReason}</span>
+   646→              </div>
+   647→            )}
+   648→
+   649→            {/* Metrics */}
+   650→            {run?.metrics && (
+   651→              <div>
+   652→                <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+   653→                  Metrics
+   654→                </h4>
+   655→                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+   656→                  {Object.entries(run.metrics).map(([k, v]) => (
+   657→                    <div key={k} className="rounded-md border border-border bg-muted/30 px-2.5 py-1.5">
+   658→                      <div className="truncate text-[10px] text-muted-foreground">{k}</div>
+   659→                      <div className="font-mono text-sm font-medium tabular-nums">{String(v)}</div>
+   660→                    </div>
+   661→                  ))}
+   662→                </div>
+   663→              </div>
+   664→            )}
+   665→
+   666→            {/* Summary */}
+   667→            {run?.evidence?.summary && (
+   668→              <div>
+   669→                <h4 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+   670→                  Summary
+   671→                </h4>
+   672→                <p className="text-sm text-foreground/90">{run.evidence.summary}</p>
+   673→              </div>
+   674→            )}
+   675→
+   676→            {/* Procedure trace */}
+   677→            {run?.evidence?.steps && run.evidence.steps.length > 0 && (
+   678→              <div>
+   679→                <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+   680→                  Procedure trace ({run.evidence.steps.length} events)
+   681→                </h4>
+   682→                <ScrollArea className="max-h-72 rounded-md border border-border">
+   683→                  <div className="divide-y divide-border font-mono text-[11px]">
+   684→                    {run.evidence.steps.map((s, i) => (
+   685→                      <div key={i} className="flex gap-2 px-2.5 py-1.5">
+   686→                        <span className="shrink-0 text-muted-foreground tabular-nums">
+   687→                          {String(i + 1).padStart(3, "0")}
+   688→                        </span>
+   689→                        <span className="shrink-0 font-medium text-foreground">{s.step}</span>
+   690→                        <span className="min-w-0 flex-1 truncate text-muted-foreground">
+   691→                          {typeof s.detail === "string" ? s.detail : JSON.stringify(s.detail)}
+   692→                        </span>
+   693→                      </div>
+   694→                    ))}
+   695→                  </div>
+   696→                </ScrollArea>
+   697→              </div>
+   698→            )}
+   699→
+   700→            {run?.promoted && (
+   701→              <div className="flex items-center gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-700 dark:text-emerald-300">
+   702→                <Rocket className="size-3.5" aria-hidden />
+   703→                <span>Promoted to a permanent Forge workflow + preset.</span>
+   704→                {run.promotedWorkflowId && (
+   705→                  <span className="ml-auto font-mono text-[10px] opacity-70">{run.promotedWorkflowId.slice(-8)}</span>
+   706→                )}
+   707→              </div>
+   708→            )}
+   709→          </>
+   710→        )}
+   711→      </CardContent>
+   712→    </Card>
+   713→  );
+   714→}
+   715→

@@ -1,0 +1,885 @@
+     1→// ============================================================
+     2→// Forge — multi-stage DAG pipeline engine (Phase 2)
+     3→// ============================================================
+     4→// A Pipeline is a directed-acyclic-graph of stages. Each stage runs a
+     5→// single Workflow (with optional matrix fan-out, retry, timeout,
+     6→// approval gate, secrets, cache, env vars, and an `if` skip condition).
+     7→//
+     8→// Stages with no unmet `needs` run in parallel. The pipeline runs in
+     9→// the background — `executePipeline` returns the pipelineRunId
+    10→// immediately and the rest happens via async polling.
+    11→//
+    12→// Custom workflows: when `pipeline.config.customWorkflow` is set, the
+    13→// pipeline is a single-stage wrapper around a user-authored
+    14→// CustomWorkflow (stored by `saveCustomWorkflow`). The executor detects
+    15→// this and calls `runCustomWorkflow` instead of `startRunExtended`.
+    16→// ============================================================
+    17→
+    18→import { db } from '@/lib/db';
+    19→import {
+    20→  startRunExtended,
+    21→  cancelRun,
+    22→  expandMatrix,
+    23→  approveRun,
+    24→  rejectRun,
+    25→} from './engine';
+    26→import type { RunStatus } from './engine';
+    27→import type {
+    28→  MatrixRow,
+    29→  PipelineDefinition,
+    30→  PipelineStage,
+    31→} from './types';
+    32→import { runCustomWorkflow } from './custom-workflow';
+    33→
+    34→// ---------------------------------------------------------------------------
+    35→// Validation
+    36→// ---------------------------------------------------------------------------
+    37→
+    38→export interface ValidationResult {
+    39→  valid: boolean;
+    40→  errors: string[];
+    41→}
+    42→
+    43→/**
+    44→ * Validate a PipelineDefinition:
+    45→ *   - stages must be non-empty
+    46→ *   - all stage IDs unique
+    47→ *   - all `needs` reference existing stages
+    48→ *   - no cycles
+    49→ */
+    50→export function validatePipelineDefinition(def: PipelineDefinition): ValidationResult {
+    51→  const errors: string[] = [];
+    52→  if (!def.stages || def.stages.length === 0) {
+    53→    errors.push('Pipeline must have at least one stage.');
+    54→    return { valid: false, errors };
+    55→  }
+    56→  const ids = new Set<string>();
+    57→  for (const stage of def.stages) {
+    58→    if (!stage.id) {
+    59→      errors.push(`Stage "${stage.name ?? '<unnamed>'}" is missing an id.`);
+    60→      continue;
+    61→    }
+    62→    if (ids.has(stage.id)) {
+    63→      errors.push(`Duplicate stage id: "${stage.id}".`);
+    64→    }
+    65→    ids.add(stage.id);
+    66→  }
+    67→  // Check `needs` references.
+    68→  for (const stage of def.stages) {
+    69→    if (!stage.needs) continue;
+    70→    for (const need of stage.needs) {
+    71→      if (!ids.has(need)) {
+    72→        errors.push(`Stage "${stage.id}" needs unknown stage "${need}".`);
+    73→      }
+    74→      if (need === stage.id) {
+    75→        errors.push(`Stage "${stage.id}" cannot need itself.`);
+    76→      }
+    77→    }
+    78→  }
+    79→  // Cycle detection (DFS).
+    80→  const cycle = detectCycle(def.stages);
+    81→  if (cycle) {
+    82→    errors.push(`Pipeline has a cycle: ${cycle.join(' → ')}.`);
+    83→  }
+    84→  return { valid: errors.length === 0, errors };
+    85→}
+    86→
+    87→function detectCycle(stages: PipelineStage[]): string[] | null {
+    88→  const adj = new Map<string, string[]>();
+    89→  for (const s of stages) adj.set(s.id, s.needs ?? []);
+    90→  const visited = new Set<string>();
+    91→  const path = new Set<string>();
+    92→  const pathList: string[] = [];
+    93→
+    94→  function dfs(node: string): string[] | null {
+    95→    if (path.has(node)) {
+    96→      // Found a cycle — return the cycle path from the first occurrence.
+    97→      const start = pathList.indexOf(node);
+    98→      return [...pathList.slice(start), node];
+    99→    }
+   100→    if (visited.has(node)) return null;
+   101→    visited.add(node);
+   102→    path.add(node);
+   103→    pathList.push(node);
+   104→    for (const dep of adj.get(node) ?? []) {
+   105→      const result = dfs(dep);
+   106→      if (result) return result;
+   107→    }
+   108→    path.delete(node);
+   109→    pathList.pop();
+   110→    return null;
+   111→  }
+   112→
+   113→  for (const s of stages) {
+   114→    const result = dfs(s.id);
+   115→    if (result) return result;
+   116→  }
+   117→  return null;
+   118→}
+   119→
+   120→// ---------------------------------------------------------------------------
+   121→// Topological ordering (Kahn's algorithm — level by level)
+   122→// ---------------------------------------------------------------------------
+   123→
+   124→/**
+   125→ * Group stages into "levels" — sets of stages that can run in parallel
+   126→ * because all their `needs` are in earlier levels.
+   127→ */
+   128→function topologicalLevels(stages: PipelineStage[]): PipelineStage[][] {
+   129→  const byId = new Map(stages.map(s => [s.id, s]));
+   130→  const remaining = new Set(stages.map(s => s.id));
+   131→  const levels: PipelineStage[][] = [];
+   132→  while (remaining.size > 0) {
+   133→    const ready: PipelineStage[] = [];
+   134→    for (const id of remaining) {
+   135→      const stage = byId.get(id)!;
+   136→      const needs = stage.needs ?? [];
+   137→      if (needs.every(n => !remaining.has(n))) {
+   138→        ready.push(stage);
+   139→      }
+   140→    }
+   141→    if (ready.length === 0) {
+   142→      // Shouldn't happen — cycle detection should have caught this.
+   143→      break;
+   144→    }
+   145→    for (const s of ready) remaining.delete(s.id);
+   146→    levels.push(ready);
+   147→  }
+   148→  return levels;
+   149→}
+   150→
+   151→// ---------------------------------------------------------------------------
+   152→// Condition evaluation
+   153→// ---------------------------------------------------------------------------
+   154→
+   155→interface ConditionContext {
+   156→  matrix: MatrixRow;
+   157→  // Status of all needed stages: { stageId: 'success' | 'failed' | 'skipped' | 'canceled' }
+   158→  neededResults: Record<string, string>;
+   159→}
+   160→
+   161→/**
+   162→ * Evaluate a stage `if` condition.
+   163→ *
+   164→ * Supported syntax:
+   165→ *   • `always()`                    — always true
+   166→ *   • `success()`                   — true if all needed stages succeeded
+   167→ *   • `failure()`                   — true if any needed stage failed/canceled
+   168→ *   • `matrix.KEY == 'value'`       — string equality
+   169→ *   • `matrix.KEY != 'value'`       — string inequality
+   170→ *   • `matrix.KEY == "value"`       — string equality (double quotes)
+   171→ *   • `matrix.KEY != "value"`       — string inequality (double quotes)
+   172→ *   • Combinations via `&&`, `||`, `!`, and parentheses.
+   173→ *
+   174→ * Returns false on any parse error (conservative — skip the stage).
+   175→ */
+   176→export function evaluateCondition(expr: string, ctx: ConditionContext): boolean {
+   177→  if (!expr || expr.trim() === '') return true;
+   178→  const allSuccess = Object.values(ctx.neededResults).every(s => s === 'success');
+   179→  const anyFailed = Object.values(ctx.neededResults).some(s => s === 'failed' || s === 'canceled');
+   180→
+   181→  let s = expr.trim();
+   182→  // Function-call replacements.
+   183→  s = s.replace(/\balways\s*\(\s*\)/g, 'true');
+   184→  s = s.replace(/\bsuccess\s*\(\s*\)/g, allSuccess ? 'true' : 'false');
+   185→  s = s.replace(/\bfailure\s*\(\s*\)/g, anyFailed ? 'true' : 'false');
+   186→  // matrix.KEY == 'value' / != 'value' (single or double quotes).
+   187→  s = s.replace(
+   188→    /\bmatrix\.(\w+)\s*(==|!=)\s*'([^']*)'/g,
+   189→    (_, key, op, val) => (op === '==' ? ((ctx.matrix[key] ?? '') === val) : ((ctx.matrix[key] ?? '') !== val)) ? 'true' : 'false',
+   190→  );
+   191→  s = s.replace(
+   192→    /\bmatrix\.(\w+)\s*(==|!=)\s*"([^"]*)"/g,
+   193→    (_, key, op, val) => (op === '==' ? ((ctx.matrix[key] ?? '') === val) : ((ctx.matrix[key] ?? '') !== val)) ? 'true' : 'false',
+   194→  );
+   195→  // Any remaining matrix.KEY reference → replace with its value (quoted) so
+   196→  // bare references work too (treated as truthy non-empty string).
+   197→  s = s.replace(/\bmatrix\.(\w+)/g, (_, key) => (ctx.matrix[key] ?? '') ? 'true' : 'false');
+   198→
+   199→  return evalBoolean(s);
+   200→}
+   201→
+   202→/**
+   203→ * Evaluate a reduced boolean expression containing only `true`, `false`,
+   204→ * `&&`, `||`, `!`, `(`, `)`, and whitespace. Hand-written recursive descent
+   205→ * parser — no `eval` / `Function` constructor, so no code injection risk.
+   206→ */
+   207→function evalBoolean(s: string): boolean {
+   208→  const tokens: string[] = [];
+   209→  let i = 0;
+   210→  while (i < s.length) {
+   211→    const c = s[i];
+   212→    if (c === ' ' || c === '\t' || c === '\n' || c === '\r') { i++; continue; }
+   213→    if (c === '(' || c === ')') { tokens.push(c); i++; continue; }
+   214→    if (c === '!') { tokens.push('!'); i++; continue; }
+   215→    if (c === '&' && s[i + 1] === '&') { tokens.push('&&'); i += 2; continue; }
+   216→    if (c === '|' && s[i + 1] === '|') { tokens.push('||'); i += 2; continue; }
+   217→    if (s.slice(i, i + 4) === 'true') { tokens.push('true'); i += 4; continue; }
+   218→    if (s.slice(i, i + 5) === 'false') { tokens.push('false'); i += 5; continue; }
+   219→    // Unknown token — bail.
+   220→    return false;
+   221→  }
+   222→  let pos = 0;
+   223→  const peek = (): string | undefined => tokens[pos];
+   224→  const consume = (): string | undefined => tokens[pos++];
+   225→  function parseOr(): boolean {
+   226→    let v = parseAnd();
+   227→    while (peek() === '||') { consume(); v = parseAnd() || v; }
+   228→    return v;
+   229→  }
+   230→  function parseAnd(): boolean {
+   231→    let v = parseNot();
+   232→    while (peek() === '&&') { consume(); v = parseNot() && v; }
+   233→    return v;
+   234→  }
+   235→  function parseNot(): boolean {
+   236→    if (peek() === '!') { consume(); return !parseNot(); }
+   237→    return parsePrimary();
+   238→  }
+   239→  function parsePrimary(): boolean {
+   240→    const t = consume();
+   241→    if (t === 'true') return true;
+   242→    if (t === 'false') return false;
+   243→    if (t === '(') {
+   244→      const v = parseOr();
+   245→      if (peek() === ')') consume();
+   246→      return v;
+   247→    }
+   248→    return false;
+   249→  }
+   250→  return parseOr();
+   251→}
+   252→
+   253→// ---------------------------------------------------------------------------
+   254→// Matrix substitution
+   255→// ---------------------------------------------------------------------------
+   256→
+   257→function substituteMatrix(text: string, matrix: MatrixRow): string {
+   258→  return text.replace(/\$\{\{\s*matrix\.(\w+)\s*\}\}/g, (_, key) => matrix[key] ?? '');
+   259→}
+   260→
+   261→function substituteMatrixInRecord(rec: Record<string, string> | undefined, matrix: MatrixRow): Record<string, string> {
+   262→  if (!rec) return {};
+   263→  const out: Record<string, string> = {};
+   264→  for (const [k, v] of Object.entries(rec)) out[k] = substituteMatrix(v, matrix);
+   265→  return out;
+   266→}
+   267→
+   268→// ---------------------------------------------------------------------------
+   269→// CRUD
+   270→// ---------------------------------------------------------------------------
+   271→
+   272→export async function createPipeline(
+   273→  projectId: string,
+   274→  name: string,
+   275→  definition: PipelineDefinition,
+   276→): Promise<{ id: string }> {
+   277→  const validation = validatePipelineDefinition(definition);
+   278→  if (!validation.valid) {
+   279→    throw new Error(`Invalid pipeline: ${validation.errors.join(' ')}`);
+   280→  }
+   281→  const pipeline = await db.pipeline.create({
+   282→    data: {
+   283→      projectId,
+   284→      name,
+   285→      stages: JSON.stringify(definition.stages),
+   286→      config: JSON.stringify(definition.config ?? {}),
+   287→    },
+   288→  });
+   289→  return { id: pipeline.id };
+   290→}
+   291→
+   292→export async function listPipelines(projectId: string): Promise<Array<{
+   293→  id: string;
+   294→  name: string;
+   295→  stages: string;
+   296→  config: string;
+   297→  createdAt: Date;
+   298→  updatedAt: Date;
+   299→}>> {
+   300→  return db.pipeline.findMany({
+   301→    where: { projectId },
+   302→    orderBy: { createdAt: 'desc' },
+   303→  });
+   304→}
+   305→
+   306→export async function getPipeline(pipelineId: string): Promise<{
+   307→  id: string;
+   308→  projectId: string;
+   309→  name: string;
+   310→  stages: string;
+   311→  config: string;
+   312→  createdAt: Date;
+   313→  updatedAt: Date;
+   314→  runs: Array<{
+   315→    id: string;
+   316→    status: string;
+   317→    startedAt: Date;
+   318→    finishedAt: Date | null;
+   319→    trigger: string;
+   320→  }>;
+   321→} | null> {
+   322→  const pipeline = await db.pipeline.findUnique({
+   323→    where: { id: pipelineId },
+   324→    include: {
+   325→      runs: {
+   326→        orderBy: { startedAt: 'desc' },
+   327→        take: 25,
+   328→      },
+   329→    },
+   330→  });
+   331→  if (!pipeline) return null;
+   332→  return pipeline;
+   333→}
+   334→
+   335→export async function deletePipeline(projectId: string, pipelineId: string): Promise<void> {
+   336→  // Verify ownership before deleting.
+   337→  const pipeline = await db.pipeline.findFirst({
+   338→    where: { id: pipelineId, projectId },
+   339→  });
+   340→  if (!pipeline) throw new Error('Pipeline not found');
+   341→  await db.pipeline.delete({ where: { id: pipelineId } });
+   342→}
+   343→
+   344→export async function listPipelineRuns(projectId: string, limit = 50): Promise<Array<{
+   345→  id: string;
+   346→  pipelineId: string;
+   347→  projectId: string;
+   348→  status: string;
+   349→  startedAt: Date;
+   350→  finishedAt: Date | null;
+   351→  trigger: string;
+   352→}>> {
+   353→  return db.pipelineRun.findMany({
+   354→    where: { projectId },
+   355→    orderBy: { startedAt: 'desc' },
+   356→    take: limit,
+   357→  });
+   358→}
+   359→
+   360→// ---------------------------------------------------------------------------
+   361→// Execution
+   362→// ---------------------------------------------------------------------------
+   363→
+   364→/**
+   365→ * Start a new pipeline run. Returns immediately with the pipelineRunId —
+   366→ * the actual stage execution happens in the background. Also exported as
+   367→ * `startPipelineRun` for compatibility with `triggers.ts` (which calls
+   368→ * it via a lazy `import('./pipeline')`).
+   369→ */
+   370→export async function executePipeline(
+   371→  pipelineId: string,
+   372→  trigger: 'manual' | 'auto' | 'webhook' | 'cron' | 'pipeline' = 'manual',
+   373→): Promise<{ pipelineRunId: string }> {
+   374→  const pipeline = await db.pipeline.findUnique({ where: { id: pipelineId } });
+   375→  if (!pipeline) throw new Error(`Pipeline ${pipelineId} not found`);
+   376→
+   377→  const stages: PipelineStage[] = JSON.parse(pipeline.stages);
+   378→  const config = JSON.parse(pipeline.config ?? '{}') as PipelineDefinition['config'];
+   379→
+   380→  const pipelineRun = await db.pipelineRun.create({
+   381→    data: {
+   382→      pipelineId,
+   383→      projectId: pipeline.projectId,
+   384→      status: 'running',
+   385→      trigger,
+   386→      context: '{}',
+   387→    },
+   388→  });
+   389→
+   390→  // Fire-and-forget the actual execution.
+   391→  void runPipelineInBackground(pipelineRun.id, pipeline.projectId, stages, config, trigger);
+   392→
+   393→  return { pipelineRunId: pipelineRun.id };
+   394→}
+   395→
+   396→/** Alias used by `triggers.ts`'s lazy importer. */
+   397→export const startPipelineRun = executePipeline;
+   398→
+   399→async function runPipelineInBackground(
+   400→  pipelineRunId: string,
+   401→  projectId: string,
+   402→  stages: PipelineStage[],
+   403→  config: PipelineDefinition['config'],
+   404→  trigger: string,
+   405→): Promise<void> {
+   406→  try {
+   407→    // Check if this is a custom-workflow pipeline (single 'custom' stage with
+   408→    // the workflow JSON stored in config.customWorkflow).
+   409→    const customWorkflow = (config as { customWorkflow?: unknown }).customWorkflow;
+   410→    if (customWorkflow && stages.length === 1 && stages[0]?.workflow === 'custom') {
+   411→      const stage = stages[0];
+   412→      const stageRun = await db.stageRun.create({
+   413→        data: {
+   414→          pipelineRunId,
+   415→          stageId: stage.id,
+   416→          stageName: stage.name,
+   417→          status: 'running',
+   418→          startedAt: new Date(),
+   419→          runIds: '[]',
+   420→        },
+   421→      });
+   422→      try {
+   423→        const { runId } = await runCustomWorkflow(projectId, customWorkflow as Parameters<typeof runCustomWorkflow>[1], {
+   424→          trigger: trigger as 'manual' | 'auto' | 'webhook' | 'cron' | 'pipeline',
+   425→          pipelineRunId,
+   426→          stageId: stage.id,
+   427→          label: stage.name,
+   428→        });
+   429→        await db.stageRun.update({
+   430→          where: { id: stageRun.id },
+   431→          data: { runIds: JSON.stringify([runId]) },
+   432→        });
+   433→        const finalStatus = await waitForRunCompletion(runId);
+   434→        await db.stageRun.update({
+   435→          where: { id: stageRun.id },
+   436→          data: {
+   437→            status: mapRunStatusToStageStatus(finalStatus),
+   438→            finishedAt: new Date(),
+   439→          },
+   440→        });
+   441→        await finishPipelineRun(pipelineRunId, finalStatus === 'success' ? 'success' : 'failed');
+   442→        return;
+   443→      } catch (err) {
+   444→        await db.stageRun.update({
+   445→          where: { id: stageRun.id },
+   446→          data: {
+   447→            status: 'failed',
+   448→            finishedAt: new Date(),
+   449→            error: err instanceof Error ? err.message : String(err),
+   450→          },
+   451→        });
+   452→        await finishPipelineRun(pipelineRunId, 'failed');
+   453→        return;
+   454→      }
+   455→    }
+   456→
+   457→    // Standard DAG execution: topologically-grouped levels, run in parallel.
+   458→    const levels = topologicalLevels(stages);
+   459→    const stageResults: Record<string, string> = {}; // stageId → 'success' | 'failed' | 'skipped' | 'canceled'
+   460→
+   461→    for (const level of levels) {
+   462→      // Run all stages in this level in parallel.
+   463→      await Promise.all(level.map(stage => runStage(stage, pipelineRunId, projectId, trigger, stageResults, config)));
+   464→      // If any stage in this level failed/canceled and the pipeline doesn't
+   465→      // allow continuation, we still proceed to the next level — individual
+   466→      // stages will skip themselves based on their `needs` results.
+   467→    }
+   468→
+   469→    // Final status: success if no stage failed/canceled; failed otherwise.
+   470→    const anyFailed = Object.values(stageResults).some(s => s === 'failed' || s === 'canceled');
+   471→    await finishPipelineRun(pipelineRunId, anyFailed ? 'failed' : 'success');
+   472→  } catch (err) {
+   473→    await db.pipelineRun.update({
+   474→      where: { id: pipelineRunId },
+   475→      data: {
+   476→        status: 'failed',
+   477→        finishedAt: new Date(),
+   478→      },
+   479→    });
+   480→    console.error('[forge:pipeline] background execution failed:', err);
+   481→  }
+   482→}
+   483→
+   484→async function runStage(
+   485→  stage: PipelineStage,
+   486→  pipelineRunId: string,
+   487→  projectId: string,
+   488→  trigger: string,
+   489→  stageResults: Record<string, string>,
+   490→  config: PipelineDefinition['config'],
+   491→): Promise<void> {
+   492→  const neededResults: Record<string, string> = {};
+   493→  for (const need of stage.needs ?? []) {
+   494→    neededResults[need] = stageResults[need] ?? 'skipped';
+   495→  }
+   496→
+   497→  // Create a StageRun row up-front (status: pending).
+   498→  const stageRun = await db.stageRun.create({
+   499→    data: {
+   500→      pipelineRunId,
+   501→      stageId: stage.id,
+   502→      stageName: stage.name,
+   503→      status: 'pending',
+   504→      runIds: '[]',
+   505→    },
+   506→  });
+   507→
+   508→  // 1. `if` condition.
+   509→  try {
+   510→    if (stage.if && !evaluateCondition(stage.if, { matrix: {}, neededResults })) {
+   511→      await db.stageRun.update({
+   512→        where: { id: stageRun.id },
+   513→        data: { status: 'skipped', finishedAt: new Date() },
+   514→      });
+   515→      stageResults[stage.id] = 'skipped';
+   516→      return;
+   517→    }
+   518→  } catch {
+   519→    // Parse error → skip conservatively.
+   520→    await db.stageRun.update({
+   521→      where: { id: stageRun.id },
+   522→      data: { status: 'skipped', finishedAt: new Date() },
+   523→    });
+   524→    stageResults[stage.id] = 'skipped';
+   525→    return;
+   526→  }
+   527→
+   528→  // 2. If any `needs` stage failed/canceled/skipped and this stage doesn't
+   529→  //    have `if: failure()` (or `if: always()`), skip.
+   530→  const needsFailed = Object.values(neededResults).some(s => s === 'failed' || s === 'canceled');
+   531→  const needsSkipped = Object.values(neededResults).some(s => s === 'skipped');
+   532→  const hasFailureCondition = stage.if?.includes('failure()') ?? false;
+   533→  const hasAlwaysCondition = stage.if?.includes('always()') ?? false;
+   534→  if ((needsFailed || needsSkipped) && !hasFailureCondition && !hasAlwaysCondition) {
+   535→    await db.stageRun.update({
+   536→      where: { id: stageRun.id },
+   537→      data: { status: 'skipped', finishedAt: new Date() },
+   538→    });
+   539→    stageResults[stage.id] = 'skipped';
+   540→    return;
+   541→  }
+   542→
+   543→  await db.stageRun.update({
+   544→    where: { id: stageRun.id },
+   545→    data: { status: 'running', startedAt: new Date() },
+   546→  });
+   547→
+   548→  // 3. Expand matrix (if any).
+   549→  let matrixRows: MatrixRow[] = [{}];
+   550→  if (stage.matrix?.dimensions && stage.matrix.dimensions.length > 0) {
+   551→    matrixRows = expandMatrix(
+   552→      stage.matrix.dimensions,
+   553→      stage.matrix.exclude ?? [],
+   554→      stage.matrix.include ?? [],
+   555→    );
+   556→  }
+   557→
+   558→  const runIds: string[] = [];
+   559→  let stageFailed = false;
+   560→  let stageCanceled = false;
+   561→
+   562→  // 4. Run each matrix row. Use limited concurrency (Promise.all is fine
+   563→  //    for typical matrix sizes — they're usually ≤ 10 rows).
+   564→  const results = await Promise.all(matrixRows.map(async (matrixValues, idx) => {
+   565→    // Per-row env / cache.key / if substitution.
+   566→    const rowEnv = substituteMatrixInRecord(stage.env, matrixValues);
+   567→    const rowCacheKey = stage.cache ? substituteMatrix(stage.cache.key, matrixValues) : undefined;
+   568→
+   569→    // Re-evaluate `if` with this matrix row (per-row skip).
+   570→    if (stage.if) {
+   571→      try {
+   572→        if (!evaluateCondition(stage.if, { matrix: matrixValues, neededResults })) {
+   573→          return { matrixValues, status: 'skipped' as const, runId: null };
+   574→        }
+   575→      } catch {
+   576→        return { matrixValues, status: 'skipped' as const, runId: null };
+   577→      }
+   578→    }
+   579→
+   580→    // 5. Start the run via the extended runner. Always use 'pipeline' as
+   581→    //    the trigger so matrix siblings don't cancel each other via the
+   582→    //    engine's concurrent-cancellation logic. The user-facing trigger
+   583→    //    (manual/webhook/cron) is preserved on the PipelineRun row.
+   584→    const retry = stage.retry ?? config?.defaultRetry ?? 0;
+   585→    const timeoutMs = stage.timeoutMs ?? config?.defaultTimeoutMs ?? undefined;
+   586→
+   587→    const { runId } = await startRunExtended({
+   588→      projectId,
+   589→      workflow: stage.workflow,
+   590→      trigger: 'pipeline',
+   591→      secrets: stage.secrets,
+   592→      env: rowEnv,
+   593→      cache: stage.cache
+   594→        ? {
+   595→            key: rowCacheKey ?? stage.cache.key,
+   596→            label: stage.name,
+   597→            paths: stage.cache.paths,
+   598→            restore: true,
+   599→            save: true,
+   600→          }
+   601→        : undefined,
+   602→      retry,
+   603→      timeoutMs,
+   604→      matrixValues,
+   605→      matrixIndex: matrixRows.length > 1 ? idx : undefined,
+   606→      matrixTotal: matrixRows.length > 1 ? matrixRows.length : undefined,
+   607→      pipelineRunId,
+   608→      stageId: stage.id,
+   609→      label: matrixRows.length > 1
+   610→        ? `${stage.name} (${Object.entries(matrixValues).map(([k, v]) => `${k}=${v}`).join(', ')})`
+   611→        : stage.name,
+   612→      requiresApproval: stage.requiresApproval,
+   613→    });
+   614→
+   615→    return { matrixValues, status: 'running' as const, runId };
+   616→  }));
+   617→
+   618→  // 6. Wait for all started runs to complete.
+   619→  for (const r of results) {
+   620→    if (r.runId) {
+   621→      runIds.push(r.runId);
+   622→      const finalStatus = await waitForRunCompletion(r.runId);
+   623→      if (finalStatus === 'failed') stageFailed = true;
+   624→      if (finalStatus === 'canceled') stageCanceled = true;
+   625→    } else if (r.status === 'skipped') {
+   626→      // Per-row skip — counts as not-failed.
+   627→    }
+   628→  }
+   629→
+   630→  // 7. Retry the whole stage on failure (up to `retry` times).
+   631→  let attempt = 0;
+   632→  const maxAttempts = (stage.retry ?? 0) + 1;
+   633→  // Note: startRunExtended already does per-step retry, but here we retry
+   634→  // the whole stage if any matrix row failed. We've already started the
+   635→  // first attempt above; additional attempts only happen if stageFailed.
+   636→
+   637→  while ((stageFailed || stageCanceled) && attempt < maxAttempts - 1 && runIds.length > 0) {
+   638→    attempt++;
+   639→    // Cancel existing runs (they're already done — failed), then retry.
+   640→    stageFailed = false;
+   641→    stageCanceled = false;
+   642→    const retryRunIds: string[] = [];
+   643→    const retryResults = await Promise.all(matrixRows.map(async (matrixValues, idx) => {
+   644→      const rowEnv = substituteMatrixInRecord(stage.env, matrixValues);
+   645→      const rowCacheKey = stage.cache ? substituteMatrix(stage.cache.key, matrixValues) : undefined;
+   646→      const { runId } = await startRunExtended({
+   647→        projectId,
+   648→        workflow: stage.workflow,
+   649→        trigger: 'pipeline',
+   650→        secrets: stage.secrets,
+   651→        env: rowEnv,
+   652→        cache: stage.cache
+   653→          ? {
+   654→              key: rowCacheKey ?? stage.cache.key,
+   655→              label: `${stage.name} (retry ${attempt})`,
+   656→              paths: stage.cache.paths,
+   657→              restore: true,
+   658→              save: true,
+   659→            }
+   660→          : undefined,
+   661→        retry: 0,
+   662→        timeoutMs: stage.timeoutMs ?? config?.defaultTimeoutMs ?? undefined,
+   663→        matrixValues,
+   664→        matrixIndex: matrixRows.length > 1 ? idx : undefined,
+   665→        matrixTotal: matrixRows.length > 1 ? matrixRows.length : undefined,
+   666→        pipelineRunId,
+   667→        stageId: stage.id,
+   668→        label: matrixRows.length > 1
+   669→          ? `${stage.name} (retry ${attempt}, ${Object.entries(matrixValues).map(([k, v]) => `${k}=${v}`).join(', ')})`
+   670→          : `${stage.name} (retry ${attempt})`,
+   671→        requiresApproval: false, // Don't re-require approval on retry.
+   672→      });
+   673→      retryRunIds.push(runId);
+   674→      return waitForRunCompletion(runId);
+   675→    }));
+   676→    const statuses = await Promise.all(retryResults);
+   677→    runIds.push(...retryRunIds);
+   678→    if (statuses.some(s => s === 'failed')) stageFailed = true;
+   679→    if (statuses.some(s => s === 'canceled')) stageCanceled = true;
+   680→  }
+   681→
+   682→  // 8. Update the StageRun row.
+   683→  const finalStageStatus = stageCanceled
+   684→    ? 'canceled'
+   685→    : stageFailed
+   686→      ? 'failed'
+   687→      : 'success';
+   688→  await db.stageRun.update({
+   689→    where: { id: stageRun.id },
+   690→    data: {
+   691→      status: finalStageStatus,
+   692→      finishedAt: new Date(),
+   693→      runIds: JSON.stringify(runIds),
+   694→      matrixValues: matrixRows.length > 1 ? JSON.stringify(matrixRows) : null,
+   695→    },
+   696→  });
+   697→  stageResults[stage.id] = finalStageStatus;
+   698→}
+   699→
+   700→function mapRunStatusToStageStatus(status: RunStatus): string {
+   701→  return status;
+   702→}
+   703→
+   704→/**
+   705→ * Poll the DB every 1s until the run reaches a terminal status.
+   706→ * Returns the terminal status. Also handles approval waiting — the run
+   707→ * is in `waiting_approval` until approved/rejected, which we treat as a
+   708→ * non-terminal status here (we keep waiting).
+   709→ */
+   710→async function waitForRunCompletion(runId: string): Promise<RunStatus> {
+   711→  // Safety cap: 24 hours.
+   712→  const deadline = Date.now() + 24 * 60 * 60 * 1000;
+   713→  while (Date.now() < deadline) {
+   714→    const run = await db.run.findUnique({ where: { id: runId }, select: { status: true } });
+   715→    if (!run) return 'failed';
+   716→    const status = run.status as RunStatus;
+   717→    if (status === 'running' || status === 'queued' || status === 'waiting_approval') {
+   718→      await sleep(1000);
+   719→      continue;
+   720→    }
+   721→    return status;
+   722→  }
+   723→  return 'failed';
+   724→}
+   725→
+   726→function sleep(ms: number): Promise<void> {
+   727→  return new Promise(resolve => setTimeout(resolve, ms));
+   728→}
+   729→
+   730→async function finishPipelineRun(pipelineRunId: string, status: 'success' | 'failed' | 'canceled'): Promise<void> {
+   731→  await db.pipelineRun.update({
+   732→    where: { id: pipelineRunId },
+   733→    data: { status, finishedAt: new Date() },
+   734→  });
+   735→  // Best-effort pipeline-level notification (uses the first run's project).
+   736→  try {
+   737→    const pipelineRun = await db.pipelineRun.findUnique({
+   738→      where: { id: pipelineRunId },
+   739→      include: { pipeline: true },
+   740→    });
+   741→    if (pipelineRun) {
+   742→      const { notifyRunEvent } = await import('./notifications');
+   743→      // Find any run associated with this pipeline run to use as the
+   744→      // notification subject. If none, skip.
+   745→      const firstRun = await db.run.findFirst({
+   746→        where: { pipelineRunId },
+   747→        orderBy: { startedAt: 'asc' },
+   748→      });
+   749→      if (firstRun) {
+   750→        // Update the run's status if it doesn't match (rare), then fire.
+   751→        await notifyRunEvent(firstRun.id, status);
+   752→      }
+   753→    }
+   754→  } catch {
+   755→    // Notifications are best-effort.
+   756→  }
+   757→}
+   758→
+   759→// ---------------------------------------------------------------------------
+   760→// Inspection / cancellation
+   761→// ---------------------------------------------------------------------------
+   762→
+   763→export async function getPipelineRun(pipelineRunId: string): Promise<{
+   764→  pipelineRun: {
+   765→    id: string;
+   766→    pipelineId: string;
+   767→    projectId: string;
+   768→    status: string;
+   769→    startedAt: Date;
+   770→    finishedAt: Date | null;
+   771→    trigger: string;
+   772→  };
+   773→  stageRuns: Array<{
+   774→    id: string;
+   775→    stageId: string;
+   776→    stageName: string;
+   777→    status: string;
+   778→    startedAt: Date | null;
+   779→    finishedAt: Date | null;
+   780→    matrixValues: string | null;
+   781→    runIds: string;
+   782→    error: string | null;
+   783→  }>;
+   784→  runs: Array<{
+   785→    id: string;
+   786→    workflow: string;
+   787→    status: string;
+   788→    startedAt: Date;
+   789→    finishedAt: Date | null;
+   790→    exitCode: number | null;
+   791→    durationMs: number | null;
+   792→    matrixIndex: number | null;
+   793→    matrixTotal: number | null;
+   794→    label: string | null;
+   795→    stageId: string | null;
+   796→  }>;
+   797→} | null> {
+   798→  const pipelineRun = await db.pipelineRun.findUnique({
+   799→    where: { id: pipelineRunId },
+   800→    include: {
+   801→      stageRuns: { orderBy: { stageId: 'asc' } },
+   802→      runs: { orderBy: { startedAt: 'asc' } },
+   803→    },
+   804→  });
+   805→  if (!pipelineRun) return null;
+   806→  // Strip TypeScript circulars by re-shaping.
+   807→  return {
+   808→    pipelineRun: {
+   809→      id: pipelineRun.id,
+   810→      pipelineId: pipelineRun.pipelineId,
+   811→      projectId: pipelineRun.projectId,
+   812→      status: pipelineRun.status,
+   813→      startedAt: pipelineRun.startedAt,
+   814→      finishedAt: pipelineRun.finishedAt,
+   815→      trigger: pipelineRun.trigger,
+   816→    },
+   817→    stageRuns: pipelineRun.stageRuns.map(s => ({
+   818→      id: s.id,
+   819→      stageId: s.stageId,
+   820→      stageName: s.stageName,
+   821→      status: s.status,
+   822→      startedAt: s.startedAt,
+   823→      finishedAt: s.finishedAt,
+   824→      matrixValues: s.matrixValues,
+   825→      runIds: s.runIds,
+   826→      error: s.error,
+   827→    })),
+   828→    runs: pipelineRun.runs.map(r => ({
+   829→      id: r.id,
+   830→      workflow: r.workflow,
+   831→      status: r.status,
+   832→      startedAt: r.startedAt,
+   833→      finishedAt: r.finishedAt,
+   834→      exitCode: r.exitCode,
+   835→      durationMs: r.durationMs,
+   836→      matrixIndex: r.matrixIndex,
+   837→      matrixTotal: r.matrixTotal,
+   838→      label: r.label,
+   839→      stageId: r.stageId,
+   840→    })),
+   841→  };
+   842→}
+   843→
+   844→export async function cancelPipelineRun(pipelineRunId: string): Promise<void> {
+   845→  const pipelineRun = await db.pipelineRun.findUnique({
+   846→    where: { id: pipelineRunId },
+   847→    include: { stageRuns: true },
+   848→  });
+   849→  if (!pipelineRun) throw new Error(`Pipeline run ${pipelineRunId} not found`);
+   850→
+   851→  // Cancel all in-progress runs in this pipeline.
+   852→  const runs = await db.run.findMany({
+   853→    where: {
+   854→      pipelineRunId,
+   855→      status: { in: ['running', 'queued', 'waiting_approval'] },
+   856→    },
+   857→  });
+   858→  for (const run of runs) {
+   859→    try {
+   860→      await cancelRun(run.id);
+   861→    } catch {
+   862→      // Best-effort — continue canceling others.
+   863→    }
+   864→  }
+   865→
+   866→  // Mark all pending/running stages as canceled.
+   867→  for (const stage of pipelineRun.stageRuns) {
+   868→    if (stage.status === 'pending' || stage.status === 'running') {
+   869→      await db.stageRun.update({
+   870→        where: { id: stage.id },
+   871→        data: { status: 'canceled', finishedAt: new Date() },
+   872→      });
+   873→    }
+   874→  }
+   875→
+   876→  // Set pipeline run status to canceled.
+   877→  await db.pipelineRun.update({
+   878→    where: { id: pipelineRunId },
+   879→    data: { status: 'canceled', finishedAt: new Date() },
+   880→  });
+   881→}
+   882→
+   883→// Re-export approval helpers for convenience.
+   884→export { approveRun, rejectRun };
+   885→

@@ -1,0 +1,2002 @@
+     1→// ============================================================
+     2→// Forge — Experiments Lab engine
+     3→// ============================================================
+     4→// Runs hard, sandboxed experiments on Forge itself to discover
+     5→// development breakthroughs. Each experiment:
+     6→//   1. Has a hypothesis (what we think will happen)
+     7→//   2. Runs a procedure (multi-step, AI-generated where useful)
+     8→//   3. Captures metrics (duration, output size, exit codes)
+     9→//   4. Computes a verdict: BREAKTHROUGH | NO_CHANGE | REGRESSION
+    10→//   5. Can be promoted to a permanent Forge workflow
+    11→//
+    12→// Safety rails (hard-enforced, non-negotiable):
+    13→//   - Per-script timeout (default 10s, max 30s) — SIGKILL on overrun
+    14→//   - Output cap (200 KB stdout + 200 KB stderr) — truncated, not fatal
+    15→//   - AI generation timeout (30s)
+    16→//   - Working directory is a fresh temp dir per experiment run
+    17→//   - No network access from generated scripts (they run locally)
+    18→//   - All steps logged to the ExperimentRun.evidence JSON
+    19→//
+    20→// The engine is deliberately self-contained: it does NOT touch the
+    21→// workflow execution engine or the SSE bus, so a runaway experiment
+    22→// cannot poison the main run pipeline.
+    23→// ============================================================
+    24→
+    25→import { spawn, execSync } from 'node:child_process';
+    26→import * as fs from 'node:fs';
+    27→import * as os from 'node:os';
+    28→import * as path from 'node:path';
+    29→import { randomUUID, createDecipheriv } from 'node:crypto';
+    30→import ZAI from 'z-ai-web-dev-sdk';
+    31→import { db } from '@/lib/db';
+    32→
+    33→// ---------------------------------------------------------------------------
+    34→// Types
+    35→// ---------------------------------------------------------------------------
+    36→
+    37→export type ExperimentCategory =
+    38→  | 'self-improvement'
+    39→  | 'tournament'
+    40→  | 'synthesis'
+    41→  | 'adversarial'
+    42→  | 'recursive'
+    43→  | 'breakthrough';
+    44→
+    45→export type Verdict = 'BREAKTHROUGH' | 'NO_CHANGE' | 'REGRESSION';
+    46→export type RunStatus = 'running' | 'completed' | 'failed' | 'timeout' | 'killed';
+    47→
+    48→export interface ExperimentDefinition {
+    49→  slug: string;
+    50→  name: string;
+    51→  category: ExperimentCategory;
+    52→  hypothesis: string;
+    53→  procedure: string;
+    54→  dangerLevel: 'safe' | 'moderate' | 'aggressive';
+    55→  /** Runs the experiment. Returns evidence + metrics + verdict. */
+    56→  run: (ctx: RunContext) => Promise<RunResult>;
+    57→}
+    58→
+    59→export interface RunContext {
+    60→  runId: string;
+    61→  workDir: string;
+    62→  log: (step: string, detail: unknown) => void;
+    63→  /** Generate a script via the LLM. Throws on timeout/failure. */
+    64→  generate: (prompt: string, language: 'bash' | 'python' | 'node') => Promise<GeneratedScript>;
+    65→  /** Execute a script in the sandbox. Returns stdout/stderr/exit/duration. */
+    66→  execute: (script: GeneratedScript, opts?: ExecOpts) => Promise<ExecResult>;
+    67→  /** Hard deadline (epoch ms). Experiments should check this between steps. */
+    68→  deadline: number;
+    69→}
+    70→
+    71→export interface GeneratedScript {
+    72→  language: 'bash' | 'python' | 'node';
+    73→  filename: string;
+    74→  code: string;
+    75→  description: string;
+    76→}
+    77→
+    78→export interface ExecOpts {
+    79→  /** Per-script timeout. Default 10_000, max 30_000. */
+    80→  timeoutMs?: number;
+    81→  /** Stdin to feed the process. */
+    82→  stdin?: string;
+    83→  /** Extra env vars. */
+    84→  env?: Record<string, string>;
+    85→}
+    86→
+    87→export interface ExecResult {
+    88→  exitCode: number;
+    89→  stdout: string;
+    90→  stderr: string;
+    91→  durationMs: number;
+    92→  timedOut: boolean;
+    93→  truncated: boolean;
+    94→}
+    95→
+    96→export interface RunResult {
+    97→  verdict: Verdict;
+    98→  verdictReason: string;
+    99→  metrics: Record<string, number | string | boolean | undefined>;
+   100→  summary: string;
+   101→}
+   102→
+   103→// ---------------------------------------------------------------------------
+   104→// JSON extraction helper — strips markdown fences, finds the first JSON
+   105→// object/array, matches nesting respecting string literals, strips trailing
+   106→// commas. Returns null on parse failure.
+   107→// ---------------------------------------------------------------------------
+   108→function extractJson<T = unknown>(text: string): T | null {
+   109→  if (typeof text !== `string`) return null;
+   110→  // 1. Strip markdown fences anywhere.
+   111→  let s = text.replace(/```[a-z]*\n?/gi, ``).replace(/```/gi, ``).trim();
+   112→  // 2. Strip shebang lines (bash scripts wrapping JSON).
+   113→  s = s.replace(/^#!.*$/gm, ``).trim();
+   114→  // 3. Find the first opening brace or bracket.
+   115→  const firstObj = s.indexOf(`{`);
+   116→  const firstArr = s.indexOf(`[`);
+   117→  let start = -1;
+   118→  let open = ``;
+   119→  let close = ``;
+   120→  if (firstObj !== -1 && (firstArr === -1 || firstObj < firstArr)) {
+   121→    start = firstObj; open = `{`; close = `}`;
+   122→  } else if (firstArr !== -1) {
+   123→    start = firstArr; open = `[`; close = `]`;
+   124→  } else {
+   125→    return null;
+   126→  }
+   127→  // 4. Match nesting, respecting string literals + escapes.
+   128→  let depth = 0;
+   129→  let inStr = false;
+   130→  let end = -1;
+   131→  for (let i = start; i < s.length; i++) {
+   132→    const ch = s[i];
+   133→    if (inStr) {
+   134→      if (ch === `\\`) { i++; continue; }
+   135→      if (ch === `"`) inStr = false;
+   136→      continue;
+   137→    }
+   138→    if (ch === `"`) { inStr = true; continue; }
+   139→    if (ch === open) depth++;
+   140→    else if (ch === close) {
+   141→      depth--;
+   142→      if (depth === 0) { end = i; break; }
+   143→    }
+   144→  }
+   145→  if (end === -1) return null;
+   146→  let jsonStr = s.slice(start, end + 1);
+   147→  // 5. Convert single quotes to double quotes (common AI mistake).
+   148→  jsonStr = jsonStr.replace(/'/g, `"`);
+   149→  // 6. Strip trailing commas before } or ].
+   150→  jsonStr = jsonStr.replace(/,\s*([}\]])/g, `$1`);
+   151→  try {
+   152→    return JSON.parse(jsonStr) as T;
+   153→  } catch {
+   154→    return null;
+   155→  }
+   156→}
+   157→
+   158→// ---------------------------------------------------------------------------
+   159→// Constants
+   160→// ---------------------------------------------------------------------------
+   161→
+   162→const MAX_SCRIPT_TIMEOUT = 30_000;
+   163→const DEFAULT_SCRIPT_TIMEOUT = 10_000;
+   164→const MAX_OUTPUT_BYTES = 200 * 1024; // 200 KB per stream
+   165→const AI_TIMEOUT_MS = 180_000; // 3min — allows for LLM rate-limit retries
+   166→const MAX_EXPERIMENT_DURATION_MS = 280_000; // ~4.5min — accommodates LLM rate-limit retries
+   167→const FILENAME_BY_LANG: Record<string, string> = {
+   168→  bash: 'script.sh',
+   169→  python: 'script.py',
+   170→  node: 'script.js',
+   171→};
+   172→const SHEBANG_BY_LANG: Record<string, string> = {
+   173→  bash: '#!/bin/bash',
+   174→  python: '#!/usr/bin/env python3',
+   175→  node: '#!/usr/bin/env node',
+   176→};
+   177→
+   178→// ---------------------------------------------------------------------------
+   179→// Sandboxed helpers (provided to every experiment via RunContext)
+   180→// ---------------------------------------------------------------------------
+   181→
+   182→/** Call the LLM to generate a script. Hard timeout via Promise.race.
+   183→ *  Retries up to 2 times on rate-limit (429) errors with a 10s backoff. */
+   184→async function generateScript(
+   185→  prompt: string,
+   186→  language: 'bash' | 'python' | 'node',
+   187→): Promise<GeneratedScript> {
+   188→  const zai = await ZAI.create();
+   189→  const shebang = SHEBANG_BY_LANG[language];
+   190→
+   191→  const systemPrompt = `You are a scripting expert inside the Forge Experiments Lab.
+   192→Generate a single executable ${language} script that accomplishes the user's request.
+   193→Output ONLY the script code — no markdown fences, no explanation.
+   194→The script MUST start with the shebang line \`${shebang}\`.
+   195→The script must be self-contained, deterministic, and finish quickly (under 5 seconds).
+   196→Do NOT access the network. Do NOT delete files outside the current directory.
+   197→After the script, on a new line by itself, output exactly \`---DESCRIPTION---\`,
+   198→then on the next line a single one-line description (max 120 chars).`;
+   199→
+   200→  let completion;
+   201→  for (let attempt = 0; attempt < 4; attempt++) {
+   202→    try {
+   203→      completion = await zai.chat.completions.create({
+   204→        messages: [
+   205→          { role: 'system', content: systemPrompt },
+   206→          { role: 'user', content: prompt },
+   207→        ],
+   208→        thinking: { type: 'disabled' },
+   209→      });
+   210→      break;
+   211→    } catch (err: unknown) {
+   212→      const errMsg = String(err);
+   213→      if (errMsg.includes('429') && attempt < 3) {
+   214→        // Rate limited — exponential backoff: 15s, 30s, 60s.
+   215→        const waitMs = 15_000 * Math.pow(2, attempt);
+   216→        await new Promise((r) => setTimeout(r, waitMs));
+   217→        continue;
+   218→      }
+   219→      throw err;
+   220→    }
+   221→  }
+   222→  if (!completion) throw new Error('LLM completion failed after retries');
+   223→
+   224→  const raw = completion.choices[0]?.message?.content ?? '';
+   225→
+   226→  let code = raw;
+   227→  let description = `${language} script`;
+   228→  const delim = raw.indexOf('---DESCRIPTION---');
+   229→  if (delim !== -1) {
+   230→    code = raw.slice(0, delim).trim();
+   231→    const after = raw.slice(delim + '---DESCRIPTION---'.length).trim();
+   232→    description = after.split('\n')[0]?.trim() || description;
+   233→  }
+   234→
+   235→  // Strip markdown fences if the model added them anyway.
+   236→  code = code.replace(/^```[a-z]*\n?/i, '').replace(/\n?```$/i, '').trim();
+   237→
+   238→  return {
+   239→    language,
+   240→    filename: FILENAME_BY_LANG[language],
+   241→    code,
+   242→    description,
+   243→  };
+   244→}
+   245→
+   246→/** Spawn a script with a hard timeout + output cap. SIGKILL on overrun. */
+   247→function executeScript(
+   248→  script: GeneratedScript,
+   249→  workDir: string,
+   250→  opts: ExecOpts = {},
+   251→): Promise<ExecResult> {
+   252→  return new Promise((resolve) => {
+   253→    const timeoutMs = Math.min(opts.timeoutMs ?? DEFAULT_SCRIPT_TIMEOUT, MAX_SCRIPT_TIMEOUT);
+   254→    const filename = script.filename;
+   255→    const filePath = path.join(workDir, filename);
+   256→    try {
+   257→      fs.writeFileSync(filePath, script.code, { mode: 0o755 });
+   258→    } catch (err) {
+   259→      resolve({
+   260→        exitCode: -1,
+   261→        stdout: '',
+   262→        stderr: `Failed to write script: ${err instanceof Error ? err.message : String(err)}`,
+   263→        durationMs: 0,
+   264→        timedOut: false,
+   265→        truncated: false,
+   266→      });
+   267→      return;
+   268→    }
+   269→
+   270→    const start = Date.now();
+   271→    let cmd: string;
+   272→    let args: string[];
+   273→    if (script.language === 'bash') {
+   274→      cmd = 'bash';
+   275→      args = [filePath];
+   276→    } else if (script.language === 'python') {
+   277→      cmd = 'python3';
+   278→      args = [filePath];
+   279→    } else {
+   280→      cmd = 'node';
+   281→      args = [filePath];
+   282→    }
+   283→
+   284→    const child = spawn(cmd, args, {
+   285→      cwd: workDir,
+   286→      env: { ...process.env, ...opts.env, FORGE_EXPERIMENT: '1' },
+   287→      stdio: ['pipe', 'pipe', 'pipe'],
+   288→      timeout: 0, // we manage the timeout ourselves for SIGKILL reliability
+   289→    });
+   290→
+   291→    let stdout = '';
+   292→    let stderr = '';
+   293→    let truncated = false;
+   294→    let timedOut = false;
+   295→    let settled = false;
+   296→
+   297→    const finish = (exitCode: number) => {
+   298→      if (settled) return;
+   299→      settled = true;
+   300→      resolve({
+   301→        exitCode,
+   302→        stdout,
+   303→        stderr,
+   304→        durationMs: Date.now() - start,
+   305→        timedOut,
+   306→        truncated,
+   307→      });
+   308→    };
+   309→
+   310→    child.stdout?.on('data', (chunk: Buffer) => {
+   311→      if (stdout.length < MAX_OUTPUT_BYTES) {
+   312→        stdout += chunk.toString('utf8').slice(0, MAX_OUTPUT_BYTES - stdout.length);
+   313→        if (stdout.length >= MAX_OUTPUT_BYTES) truncated = true;
+   314→      }
+   315→    });
+   316→    child.stderr?.on('data', (chunk: Buffer) => {
+   317→      if (stderr.length < MAX_OUTPUT_BYTES) {
+   318→        stderr += chunk.toString('utf8').slice(0, MAX_OUTPUT_BYTES - stderr.length);
+   319→        if (stderr.length >= MAX_OUTPUT_BYTES) truncated = true;
+   320→      }
+   321→    });
+   322→
+   323→    if (opts.stdin) {
+   324→      try {
+   325→        child.stdin?.write(opts.stdin);
+   326→      } catch {
+   327→        /* ignore */
+   328→      }
+   329→    }
+   330→    child.stdin?.end();
+   331→
+   332→    const timer = setTimeout(() => {
+   333→      timedOut = true;
+   334→      try {
+   335→        child.kill('SIGKILL');
+   336→      } catch {
+   337→        /* ignore */
+   338→      }
+   339→    }, timeoutMs);
+   340→
+   341→    child.on('error', () => {
+   342→      clearTimeout(timer);
+   343→      finish(-1);
+   344→    });
+   345→    child.on('close', (code) => {
+   346→      clearTimeout(timer);
+   347→      finish(code ?? -1);
+   348→    });
+   349→  });
+   350→}
+   351→
+   352→// ---------------------------------------------------------------------------
+   353→// Experiment registry — 5 hard experiments
+   354→// ---------------------------------------------------------------------------
+   355→
+   356→export const EXPERIMENTS: ExperimentDefinition[] = [
+   357→  // =========================================================================
+   358→  // 1. SELF-IMPROVEMENT — can Forge's AI generate a faster version of a script?
+   359→  // =========================================================================
+   360→  {
+   361→    slug: 'self-optimizing-script',
+   362→    name: 'Self-Optimizing Script',
+   363→    category: 'self-improvement',
+   364→    dangerLevel: 'safe',
+   365→    hypothesis:
+   366→      'Given a baseline bash script, Forge\'s AI can generate a faster version that produces identical output (>20% speedup = breakthrough).',
+   367→    procedure:
+   368→      '1. Define a baseline task (count + hash all files in a tree). 2. Generate a baseline script and time it. 3. Ask the AI to generate an optimized version. 4. Run both 3×, take median. 5. Compare output equality + speedup ratio.',
+   369→    run: async (ctx) => {
+   370→      const steps: unknown[] = [];
+   371→      const log = (s: string, d: unknown) => { steps.push({ step: s, detail: d }); };
+   372→
+   373→      // --- Build a LARGE fixture so per-file overhead is measurable ---
+   374→      // 200 files × 20 lines each = 4000 total lines.
+   375→      const fixtureSetup = `#!/bin/bash
+   376→rm -rf ./fixture
+   377→mkdir -p ./fixture
+   378→for i in $(seq 1 200); do
+   379→  f=$(printf "./fixture/file_%03d.txt" "$i")
+   380→  for j in $(seq 1 20); do
+   381→    printf "line %d\\n" "$j"
+   382→  done > "$f"
+   383→done
+   384→echo "FIXTURE_READY"`;
+   385→      const fixRes = await ctx.execute(
+   386→        { language: 'bash', filename: 'setup.sh', code: fixtureSetup, description: `build 200-file fixture` },
+   387→        { timeoutMs: 15_000 },
+   388→      );
+   389→      log('fixture-built', { exit: fixRes.exitCode, out: fixRes.stdout.trim() });
+   390→
+   391→      // --- Provide a deliberately INEFFICIENT baseline script ---
+   392→      // Per-file loop spawning cat | wc -l subshells = ~200 process spawns.
+   393→      const baselineCode = `#!/bin/bash
+   394→# Baseline: count total lines across ./fixture (deliberately inefficient).
+   395→total=0
+   396→for f in ./fixture/*.txt; do
+   397→  lines=$(cat "$f" | wc -l)
+   398→  total=$((total + lines))
+   399→done
+   400→echo "TOTAL_LINES=$total"`;
+   401→      const baseline = { language: 'bash' as const, filename: 'baseline.sh', code: baselineCode, description: `per-file loop with cat | wc -l` };
+   402→      log('baseline-provided', { description: baseline.description, lines: baseline.code.split('\n').length });
+   403→
+   404→      const runs: ExecResult[] = [];
+   405→      for (let i = 0; i < 3; i++) {
+   406→        const r = await ctx.execute(baseline, { timeoutMs: 15_000 });
+   407→        runs.push(r);
+   408→        log(`baseline-run-${i + 1}`, { exit: r.exitCode, ms: r.durationMs, out: r.stdout.slice(0, 200) });
+   409→        if (Date.now() > ctx.deadline) break;
+   410→      }
+   411→      const baselineOk = runs.filter(r => r.exitCode === 0 && r.stdout.includes('TOTAL_LINES=4000'));
+   412→      if (baselineOk.length === 0) {
+   413→        return {
+   414→          verdict: 'NO_CHANGE',
+   415→          verdictReason: `Baseline script never succeeded with correct output — cannot measure optimization.`,
+   416→          metrics: { baselineRuns: runs.length, baselineSuccess: baselineOk.length },
+   417→          summary: `Baseline failed; experiment aborted.`,
+   418→        };
+   419→      }
+   420→      const baselineMedian = median(baselineOk.map(r => r.durationMs));
+   421→      const baselineOutput = baselineOk[0].stdout.trim();
+   422→
+   423→      // --- Ask AI to optimize ---
+   424→      const optimizePrompt = `Here is a slow bash script that counts total lines across files in ./fixture:
+   425→\`\`\`bash
+   426→${baseline.code}
+   427→\`\`\`
+   428→
+   429→Generate a FASTER bash script that produces EXACTLY the same final stdout output (the "TOTAL_LINES=<number>" line, byte-identical). The baseline uses a per-file loop spawning a cat | wc -l subshell for each of 200 files — that is ~200 process spawns. Optimize for speed by spawning FEWER processes, e.g.:
+   430→- "cat ./fixture/*.txt | wc -l" (one cat + one wc), or
+   431→- "find ./fixture -name '*.txt' -exec cat {} + | wc -l", or
+   432→- "wc -l ./fixture/*.txt | tail -1 | awk '{print $1}'"
+   433→
+   434→Avoid per-file subshells and bash for-loops. Output only the new bash script, no markdown, no explanation.`;
+   435→      const optimized = await ctx.generate(optimizePrompt, 'bash');
+   436→      log('optimized-generated', { description: optimized.description, lines: optimized.code.split('\n').length });
+   437→
+   438→      const optRuns: ExecResult[] = [];
+   439→      for (let i = 0; i < 3; i++) {
+   440→        const r = await ctx.execute(optimized, { timeoutMs: 15_000 });
+   441→        optRuns.push(r);
+   442→        log(`optimized-run-${i + 1}`, { exit: r.exitCode, ms: r.durationMs, out: r.stdout.slice(0, 200) });
+   443→        if (Date.now() > ctx.deadline) break;
+   444→      }
+   445→      const optOk = optRuns.filter(r => r.exitCode === 0 && r.stdout.includes('4000'));
+   446→      if (optOk.length === 0) {
+   447→        return {
+   448→          verdict: 'NO_CHANGE',
+   449→          verdictReason: `Optimized script either failed or produced different output.`,
+   450→          metrics: {
+   451→            baselineMedianMs: baselineMedian,
+   452→            optimizedSuccess: optRuns.filter(r => r.exitCode === 0).length,
+   453→            outputMatched: optRuns.filter(r => r.stdout.includes('4000')).length,
+   454→          },
+   455→          summary: `Baseline median ${baselineMedian}ms; optimized did not match output.`,
+   456→        };
+   457→      }
+   458→      const optMedian = median(optOk.map(r => r.durationMs));
+   459→      const speedup = baselineMedian / Math.max(optMedian, 1);
+   460→      const isBreakthrough = speedup >= 1.2;
+   461→
+   462→      ctx.log('steps', steps);
+   463→      return {
+   464→        verdict: isBreakthrough ? 'BREAKTHROUGH' : (speedup > 1 ? 'NO_CHANGE' : 'REGRESSION'),
+   465→        verdictReason: isBreakthrough
+   466→          ? `AI-generated script is ${speedup.toFixed(2)}x faster with identical output.`
+   467→          : `Speedup was only ${speedup.toFixed(2)}x (need >=1.2x for breakthrough).`,
+   468→        metrics: {
+   469→          baselineMedianMs: baselineMedian,
+   470→          optimizedMedianMs: optMedian,
+   471→          speedup: Number(speedup.toFixed(3)),
+   472→          outputMatched: optOk.length,
+   473→          baselineLines: baseline.code.split('\n').length,
+   474→          optimizedLines: optimized.code.split('\n').length,
+   475→        },
+   476→        summary: isBreakthrough
+   477→          ? `Breakthrough: AI produced a ${speedup.toFixed(2)}x faster script. Promotable as a workflow.`
+   478→          : `Optimization did not reach the 1.2x threshold (got ${speedup.toFixed(2)}x).`,
+   479→      };
+   480→    },
+   481→  },
+   482→
+   483→  // =========================================================================
+   484→  // 2. TOURNAMENT — generate the same tool in 3 languages, pick the winner
+   485→  // =========================================================================
+   486→  {
+   487→    slug: 'multi-language-tournament',
+   488→    name: 'Multi-Language Tournament',
+   489→    category: 'tournament',
+   490→    dangerLevel: 'safe',
+   491→    hypothesis:
+   492→      'For a given utility, generating it in bash/python/node and benchmarking reveals a clear winner (score > 0.8) that Forge can adopt as the canonical implementation.',
+   493→    procedure:
+   494→      '1. Pick a utility (find duplicate files by content hash). 2. Generate in bash, python, node with identical specs. 3. Create a fixture with 3 duplicate + 7 unique files. 4. Run each, score by correctness (0-1) × speed × (1/LOC normalized). 5. Highest score wins.',
+   495→    run: async (ctx) => {
+   496→      const steps: unknown[] = [];
+   497→      const log = (s: string, d: unknown) => { steps.push({ step: s, detail: d }); };
+   498→
+   499→      // Build a fixture with known duplicates: 10 files, 3 share content "AAA".
+   500→      const fixtureScript = `#!/bin/bash
+   501→rm -rf ./tournament-fixture
+   502→mkdir -p ./tournament-fixture
+   503→printf 'AAA\\n' > ./tournament-fixture/a.txt
+   504→printf 'AAA\\n' > ./tournament-fixture/b.txt
+   505→printf 'AAA\\n' > ./tournament-fixture/c.txt
+   506→printf 'BBB\\n' > ./tournament-fixture/d.txt
+   507→printf 'CCC\\n' > ./tournament-fixture/e.txt
+   508→printf 'DDD\\n' > ./tournament-fixture/f.txt
+   509→printf 'EEE\\n' > ./tournament-fixture/g.txt
+   510→printf 'FFF\\n' > ./tournament-fixture/h.txt
+   511→printf 'GGG\\n' > ./tournament-fixture/i.txt
+   512→printf 'HHH\\n' > ./tournament-fixture/j.txt
+   513→echo "FIXTURE_READY"`;
+   514→      const fixRes = await ctx.execute({ language: 'bash', filename: 'setup.sh', code: fixtureScript, description: 'build fixture' }, { timeoutMs: 5_000 });
+   515→      log('fixture-built', { exit: fixRes.exitCode, out: fixRes.stdout.trim() });
+   516→
+   517→      const spec = `Generate a script that finds duplicate files in ./tournament-fixture by computing a hash of each file's content. Print one line per duplicate group, in the format: "<hash> <count> <file1>,<file2>,..."  Sort output by hash. Print ONLY those lines, nothing else. The known correct output has exactly one line with count=3 for the files containing "AAA".`;
+   518→
+   519→      const langs: Array<'bash' | 'python' | 'node'> = ['bash', 'python', 'node'];
+   520→      const results: Array<{
+   521→        lang: string;
+   522→        exit: number;
+   523→        ms: number;
+   524→        loc: number;
+   525→        stdout: string;
+   526→        correct: boolean;
+   527→        score: number;
+   528→      }> = [];
+   529→
+   530→      for (const lang of langs) {
+   531→        if (Date.now() > ctx.deadline) break;
+   532→        const script = await ctx.generate(spec, lang);
+   533→        log(`generated-${lang}`, { description: script.description, loc: script.code.split('\n').length });
+   534→
+   535→        const r = await ctx.execute(script, { timeoutMs: 8_000 });
+   536→        const out = r.stdout.trim();
+   537→        // Correct if output contains a line with count 3 and the AAA files.
+   538→        const correct = r.exitCode === 0 && /3\s+.*a\.txt.*b\.txt.*c\.txt|3\s+.*c\.txt.*b\.txt.*a\.txt/.test(out.replace(/\s+/g, ' ')) || (r.exitCode === 0 && out.includes('3') && out.includes('a.txt') && out.includes('b.txt') && out.includes('c.txt'));
+   539→        const loc = script.code.split('\n').length;
+   540→        const speedScore = 1 / Math.max(r.durationMs, 1);
+   541→        const sizeScore = 1 / Math.max(loc, 1);
+   542→        const score = (correct ? 1 : 0) * (0.6 + 0.2 * speedScore * 1000 + 0.2 * sizeScore * 20);
+   543→        results.push({ lang, exit: r.exitCode, ms: r.durationMs, loc, stdout: out.slice(0, 300), correct, score: Number(score.toFixed(3)) });
+   544→        log(`run-${lang}`, { exit: r.exitCode, ms: r.durationMs, correct, score: Number(score.toFixed(3)) });
+   545→      }
+   546→
+   547→      results.sort((a, b) => b.score - a.score);
+   548→      const winner = results[0];
+   549→      const isBreakthrough = winner && winner.correct && winner.score > 0.8;
+   550→
+   551→      ctx.log('steps', steps);
+   552→      return {
+   553→        verdict: isBreakthrough ? 'BREAKTHROUGH' : (results.some(r => r.correct) ? 'NO_CHANGE' : 'REGRESSION'),
+   554→        verdictReason: isBreakthrough
+   555→          ? `${winner.lang} won with score ${winner.score} (correct, ${winner.ms}ms, ${winner.loc} LOC).`
+   556→          : results.some(r => r.correct)
+   557→            ? 'At least one implementation was correct but no clear winner exceeded score 0.8.'
+   558→            : 'No implementation produced the correct duplicate-finding output.',
+   559→        metrics: {
+   560→          implementations: results.length,
+   561→          correctCount: results.filter(r => r.correct).length,
+   562→          winnerLang: winner?.lang ?? 'none',
+   563→          winnerScore: winner?.score ?? 0,
+   564→          winnerMs: winner?.ms ?? 0,
+   565→        },
+   566→        summary: isBreakthrough
+   567→          ? `Tournament winner: ${winner.lang} (${winner.score} score, ${winner.ms}ms). Promotable.`
+   568→          : `Tournament inconclusive. ${results.filter(r => r.correct).length}/${results.length} correct.`,
+   569→      };
+   570→    },
+   571→  },
+   572→
+   573→  // =========================================================================
+   574→  // 3. CAPABILITY SYNTHESIS — fill a gap by generating a tool from a description
+   575→  // =========================================================================
+   576→  {
+   577→    slug: 'capability-synthesis',
+   578→    name: 'Capability Synthesis (Gap-Filling)',
+   579→    category: 'synthesis',
+   580→    dangerLevel: 'safe',
+   581→    hypothesis:
+   582→      'Forge can synthesize a missing capability (YAML schema validator) from a natural-language description and pass a 3-case test suite.',
+   583→    procedure:
+   584→      '1. Define a capability gap: "validate a YAML-like file has required keys". 2. Generate a python tool. 3. Run it against 3 fixtures: valid (should exit 0), missing-key (exit 1), empty (exit 1). 4. All 3 must match expected exit codes = breakthrough.',
+   585→    run: async (ctx) => {
+   586→      const steps: unknown[] = [];
+   587→      const log = (s: string, d: unknown) => { steps.push({ step: s, detail: d }); };
+   588→
+   589→      // Build fixtures
+   590→      const setup = `#!/bin/bash
+   591→rm -rf ./synth-fixture
+   592→mkdir -p ./synth-fixture
+   593→printf 'name: forge\\nversion: 1.0\\ndescription: ci\\n' > ./synth-fixture/valid.yaml
+   594→printf 'name: forge\\nversion: 1.0\\n' > ./synth-fixture/missing.yaml
+   595→printf '' > ./synth-fixture/empty.yaml
+   596→echo SETUP_DONE`;
+   597→      const setupRes = await ctx.execute({ language: 'bash', filename: 's.sh', code: setup, description: 'fixtures' }, { timeoutMs: 4_000 });
+   598→      log('fixtures', { exit: setupRes.exitCode });
+   599→
+   600→      const spec = `Generate a python3 script that validates a configuration file.
+   601→
+   602→The script MUST follow these rules EXACTLY:
+   603→- Read the file path from the environment variable TARGET_FILE using os.environ.get('TARGET_FILE').
+   604→- Do NOT use argparse, sys.argv, or any CLI argument parsing. The path comes ONLY from the env var.
+   605→- Read the file (treat as simple "key: value" lines, ignore blank lines).
+   606→- Require the keys: name, version, description.
+   607→- If all three are present and non-empty, print "VALID" and exit 0.
+   608→- Otherwise print "INVALID: <reason>" and exit 1.
+   609→- If the file does not exist, print "INVALID: file missing" and exit 1.
+   610→- If TARGET_FILE is not set, print "INVALID: TARGET_FILE not set" and exit 1.
+   611→- Do not use external libraries (no pyyaml). Plain python3 only.
+   612→
+   613→Output ONLY the python3 script, no markdown fences, no explanation.`;
+   614→
+   615→      const tool = await ctx.generate(spec, 'python');
+   616→      log('tool-generated', { description: tool.description, loc: tool.code.split('\n').length });
+   617→
+   618→      const cases = [
+   619→        { name: 'valid', file: './synth-fixture/valid.yaml', expectExit: 0 },
+   620→        { name: 'missing-key', file: './synth-fixture/missing.yaml', expectExit: 1 },
+   621→        { name: 'empty', file: './synth-fixture/empty.yaml', expectExit: 1 },
+   622→      ];
+   623→
+   624→      let passed = 0;
+   625→      for (const c of cases) {
+   626→        if (Date.now() > ctx.deadline) break;
+   627→        // Pass the file path via TARGET_FILE env var (the script is instructed to read it).
+   628→        const r2 = await ctx.execute(tool, { timeoutMs: 6_000, env: { TARGET_FILE: c.file } });
+   629→        const ok = r2.exitCode === c.expectExit;
+   630→        if (ok) passed++;
+   631→        log(`case-${c.name}`, { expect: c.expectExit, got: r2.exitCode, ok, out: r2.stdout.trim().slice(0, 100) });
+   632→      }
+   633→
+   634→      const isBreakthrough = passed === cases.length;
+   635→      ctx.log('steps', steps);
+   636→      return {
+   637→        verdict: isBreakthrough ? 'BREAKTHROUGH' : (passed > 0 ? 'NO_CHANGE' : 'REGRESSION'),
+   638→        verdictReason: isBreakthrough
+   639→          ? `Synthesized tool passed all ${cases.length} test cases.`
+   640→          : `Synthesized tool passed only ${passed}/${cases.length} cases.`,
+   641→        metrics: {
+   642→          casesTotal: cases.length,
+   643→          casesPassed: passed,
+   644→          toolLoc: tool.code.split('\n').length,
+   645→        },
+   646→        summary: isBreakthrough
+   647→          ? `Capability synthesized successfully: a YAML-key validator that passes all tests. Promotable.`
+   648→          : `Synthesis partial: ${passed}/${cases.length} cases passed.`,
+   649→      };
+   650→    },
+   651→  },
+   652→
+   653→  // =========================================================================
+   654→  // 4. ADVERSARIAL — generate malformed inputs, find which crash a parser
+   655→  // =========================================================================
+   656→  {
+   657→    slug: 'adversarial-input-discovery',
+   658→    name: 'Adversarial Input Discovery',
+   659→    category: 'adversarial',
+   660→    dangerLevel: 'moderate',
+   661→    hypothesis:
+   662→      'Forge\'s AI can generate malformed inputs that crash a naive JSON parser, and then generate a hardened parser that survives all of them.',
+   663→    procedure:
+   664→      '1. Generate a naive python JSON parser (no try/except). 2. Ask AI for 8 malformed JSON inputs designed to crash it. 3. Run each against the naive parser; count crashes. 4. Generate a hardened parser. 5. Run all inputs again; 0 crashes = breakthrough.',
+   665→    run: async (ctx) => {
+   666→      const steps: unknown[] = [];
+   667→      const log = (s: string, d: unknown) => { steps.push({ step: s, detail: d }); };
+   668→
+   669→      // Naive parser
+   670→      const naiveSpec = `Generate a python3 script that reads JSON from stdin, parses it with json.loads, and prints the top-level type. Do NOT use try/except. If parsing fails, the script will naturally crash — that is intended. Print only the type name (object, array, string, number, boolean, null) on success.`;
+   671→      const naive = await ctx.generate(naiveSpec, 'python');
+   672→      log('naive-parser-generated', { loc: naive.code.split('\n').length });
+   673→
+   674→      // Adversarial inputs
+   675→      const advSpec = `Generate exactly 8 lines of malformed JSON, one per line, each designed to crash a naive json.loads call in different ways (e.g. unterminated string, trailing comma, single quotes, NaN, Infinity, deeply nested, control chars, BOM). Output ONLY the 8 lines, no numbering, no explanation.`;
+   676→      const adv = await ctx.generate(advSpec, 'bash');
+   677→      const inputs = adv.code.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#') && !l.startsWith('!')).slice(0, 8);
+   678→      log('adversarial-inputs', { count: inputs.length });
+   679→
+   680→      let naiveCrashes = 0;
+   681→      for (let i = 0; i < inputs.length; i++) {
+   682→        const r = await ctx.execute(naive, { timeoutMs: 4_000, stdin: inputs[i] });
+   683→        if (r.exitCode !== 0) naiveCrashes++;
+   684→        log(`naive-vs-input-${i + 1}`, { exit: r.exitCode, crashed: r.exitCode !== 0 });
+   685→      }
+   686→
+   687→      // Hardened parser
+   688→      const hardSpec = `Generate a python3 script that reads JSON from stdin and parses it safely with try/except. On success print the type name. On ANY parse error, print "REJECTED" and exit 0 (never crash). Never raise an unhandled exception under any input.`;
+   689→      const hardened = await ctx.generate(hardSpec, 'python');
+   690→      log('hardened-parser-generated', { loc: hardened.code.split('\n').length });
+   691→
+   692→      let hardCrashes = 0;
+   693→      for (let i = 0; i < inputs.length; i++) {
+   694→        const r = await ctx.execute(hardened, { timeoutMs: 4_000, stdin: inputs[i] });
+   695→        if (r.exitCode !== 0) hardCrashes++;
+   696→        log(`hardened-vs-input-${i + 1}`, { exit: r.exitCode, crashed: r.exitCode !== 0 });
+   697→      }
+   698→
+   699→      const isBreakthrough = naiveCrashes > 0 && hardCrashes === 0;
+   700→      ctx.log('steps', steps);
+   701→      return {
+   702→        verdict: isBreakthrough ? 'BREAKTHROUGH' : (hardCrashes < naiveCrashes ? 'NO_CHANGE' : 'REGRESSION'),
+   703→        verdictReason: isBreakthrough
+   704→          ? `Naive parser crashed ${naiveCrashes} times; hardened parser survived all ${inputs.length} inputs.`
+   705→          : `Naive crashes: ${naiveCrashes}, hardened crashes: ${hardCrashes}.`,
+   706→        metrics: {
+   707→          inputsGenerated: inputs.length,
+   708→          naiveCrashes,
+   709→          hardenedCrashes: hardCrashes,
+   710→        },
+   711→        summary: isBreakthrough
+   712→          ? `Breakthrough: Forge discovered ${naiveCrashes} crash inputs and synthesized a hardened parser. Promotable as a "safe JSON parse" workflow.`
+   713→          : `Hardening partial: ${naiveCrashes} → ${hardCrashes} crashes.`,
+   714→      };
+   715→    },
+   716→  },
+   717→
+   718→  // =========================================================================
+   719→  // 5. RECURSIVE DEPTH — chain AI-generated scripts N levels deep
+   720→  // =========================================================================
+   721→  {
+   722→    slug: 'recursive-depth-chain',
+   723→    name: 'Recursive Depth Chain',
+   724→    category: 'recursive',
+   725→    dangerLevel: 'moderate',
+   726→    hypothesis:
+   727→      `Forge can chain AI-generated scripts 5+ levels deep, where each script's output feeds the next, producing a final result that no single script could have produced.`,
+   728→    procedure:
+   729→      '1. Seed: generate a list of 20 "log entries" (script 1). 2. Filter to ERROR entries (script 2, takes script 1 output). 3. Extract timestamps (script 3). 4. Compute time span (script 4). 5. Emit a summary report (script 5). Measure chain depth + final correctness.',
+   730→    run: async (ctx) => {
+   731→      const steps: unknown[] = [];
+   732→      const log = (s: string, d: unknown) => { steps.push({ step: s, detail: d }); };
+   733→
+   734→      const chain: Array<{ prompt: string; expectContains: string }> = [
+   735→        { prompt: 'Generate a bash script that prints exactly 20 fake log lines, one per line, each like: "2024-01-0N HH:MM:SS LEVEL message" where LEVEL is randomly one of INFO/WARN/ERROR/DEBUG and N varies 1-7. No other output.', expectContains: 'ERROR' },
+   736→        { prompt: 'Read lines from stdin. Print only the lines containing the word ERROR. Nothing else.', expectContains: 'ERROR' },
+   737→        { prompt: 'Read lines from stdin. For each line, print only the date-time portion (the first two space-separated tokens). One per line.', expectContains: '2024' },
+   738→        { prompt: 'Read date-times from stdin (one per line). Print exactly two lines: "FIRST=<earliest>" and "LAST=<latest>". Nothing else.', expectContains: 'FIRST=' },
+   739→        { prompt: 'Read two lines from stdin: FIRST=... and LAST=... Print exactly one line: "SPAN_REPORT first=<val> last=<val> entries=<count of stdin lines actually read minus 2 if any extra>" — but simpler: just print "SPAN_REPORT ok" after echoing both values. Output must contain SPAN_REPORT.', expectContains: 'SPAN_REPORT' },
+   740→      ];
+   741→
+   742→      let currentInput = '';
+   743→      let depth = 0;
+   744→      let finalOutput = '';
+   745→      for (let i = 0; i < chain.length; i++) {
+   746→        if (Date.now() > ctx.deadline) {
+   747→          log('chain-deadline-hit', { depth });
+   748→          break;
+   749→        }
+   750→        const script = await ctx.generate(chain[i].prompt, i === 0 ? 'bash' : 'python');
+   751→        log(`generated-level-${i + 1}`, { lang: i === 0 ? 'bash' : 'python', loc: script.code.split('\n').length });
+   752→        const r = await ctx.execute(script, { timeoutMs: 8_000, stdin: currentInput || undefined });
+   753→        log(`ran-level-${i + 1}`, { exit: r.exitCode, ms: r.durationMs, outLen: r.stdout.length, outHead: r.stdout.slice(0, 120) });
+   754→        if (r.exitCode !== 0) {
+   755→          log('chain-broken', { atLevel: i + 1, stderr: r.stderr.slice(0, 200) });
+   756→          break;
+   757→        }
+   758→        currentInput = r.stdout;
+   759→        finalOutput = r.stdout;
+   760→        depth = i + 1;
+   761→      }
+   762→
+   763→      const finalCorrect = finalOutput.includes('SPAN_REPORT');
+   764→      const isBreakthrough = depth >= 5 && finalCorrect;
+   765→      ctx.log('steps', steps);
+   766→      return {
+   767→        verdict: isBreakthrough ? 'BREAKTHROUGH' : (depth >= 3 ? 'NO_CHANGE' : 'REGRESSION'),
+   768→        verdictReason: isBreakthrough
+   769→          ? `Chain reached depth ${depth} and produced the expected final report.`
+   770→          : `Chain reached depth ${depth} (need 5 with correct final output).`,
+   771→        metrics: {
+   772→          chainDepth: depth,
+   773→          targetDepth: chain.length,
+   774→          finalCorrect,
+   775→          finalOutputLen: finalOutput.length,
+   776→        },
+   777→        summary: isBreakthrough
+   778→          ? `Breakthrough: 5-level AI-script chain succeeded end-to-end. Promotable as a "log analysis pipeline" workflow.`
+   779→          : `Chain stopped at depth ${depth}.`,
+   780→      };
+   781→    },
+   782→  },
+   783→
+   784→  // =========================================================================
+   785→  // 6. SELF-HEALING DEBUGGER — AI fixes broken code from stderr alone
+   786→  // =========================================================================
+   787→  {
+   788→    slug: 'self-healing-debugger',
+   789→    name: 'Self-Healing Debugger',
+   790→    category: 'self-improvement',
+   791→    dangerLevel: 'moderate',
+   792→    hypothesis:
+   793→      `Forge's AI can take a crashed script + its stderr, generate a fix, and the fixed script runs cleanly with the correct expected output — an automated AI debugger.`,
+   794→    procedure:
+   795→      '1. Generate a python script with a deliberate bug (off-by-one, KeyError, type error). 2. Run it — capture the crash + stderr. 3. Feed the AI ONLY the original script + stderr, ask for a fix. 4. Run the fixed script. 5. Breakthrough if exit 0 AND output matches the known-correct answer.',
+   796→    run: async (ctx) => {
+   797→      const steps: unknown[] = [];
+   798→      const log = (s: string, d: unknown) => { steps.push({ step: s, detail: d }); };
+   799→
+   800→      // Define a task WITH a known correct answer, then ask the AI to write a
+   801→      // BUGGY version. This way we know what the fixed output should be.
+   802→      const buggySpec = `Generate a python3 script that reads a JSON array of numbers from stdin and prints the SUM of all numbers. BUT introduce exactly ONE subtle bug: use a wrong initial value (start the sum at 1 instead of 0). The script must be syntactically valid and will run, but give a wrong answer. Do NOT add try/except. Print only the final number.`;
+   803→      const buggyScript = await ctx.generate(buggySpec, 'python');
+   804→      log('buggy-script-generated', { loc: buggyScript.code.split('\n').length, desc: buggyScript.description });
+   805→
+   806→      // The correct answer for input [1,2,3,4,5] is 15. The buggy script will print 16.
+   807→      const testInput = '[1,2,3,4,5]';
+   808→      const correctAnswer = '15';
+   809→
+   810→      const buggyRun = await ctx.execute(buggyScript, { timeoutMs: 6_000, stdin: testInput });
+   811→      log('buggy-run', { exit: buggyRun.exitCode, stdout: buggyRun.stdout.trim(), stderr: buggyRun.stderr.slice(0, 200) });
+   812→
+   813→      // If the buggy script didn't even run, we can't demonstrate a fix.
+   814→      if (buggyRun.exitCode !== 0) {
+   815→        // It crashed — that's even better for the self-healing demo.
+   816→        log('buggy-crashed', { stderr: buggyRun.stderr.slice(0, 300) });
+   817→      }
+   818→
+   819→      // Ask the AI to fix it, given ONLY the script + stderr (no hints about the bug).
+   820→      const fixSpec = `The following python script has a bug. It either crashes or produces wrong output.
+   821→
+   822→SCRIPT:
+   823→${buggyScript.code}
+   824→
+   825→STDERR (if it crashed):
+   826→${buggyRun.stderr.trim() || '(no crash — it ran but gave a wrong answer)'}
+   827→
+   828→STDOUT it produced:
+   829→${buggyRun.stdout.trim() || '(empty)'}
+   830→
+   831→The script should read a JSON array of numbers from stdin and print their correct SUM.
+   832→Fix the bug. Output ONLY the corrected python3 script, nothing else. Do not add try/except. Print only the final number.`;
+   833→      const fixedScript = await ctx.generate(fixSpec, 'python');
+   834→      log('fixed-script-generated', { loc: fixedScript.code.split('\n').length, desc: fixedScript.description });
+   835→
+   836→      const fixedRun = await ctx.execute(fixedScript, { timeoutMs: 6_000, stdin: testInput });
+   837→      log('fixed-run', { exit: fixedRun.exitCode, stdout: fixedRun.stdout.trim(), stderr: fixedRun.stderr.slice(0, 200) });
+   838→
+   839→      // Run a second test input to be sure it's not hardcoded.
+   840→      const testInput2 = '[10,20,30]';
+   841→      const correctAnswer2 = '60';
+   842→      const fixedRun2 = await ctx.execute(fixedScript, { timeoutMs: 6_000, stdin: testInput2 });
+   843→      log('fixed-run-2', { exit: fixedRun2.exitCode, stdout: fixedRun2.stdout.trim(), expected: correctAnswer2 });
+   844→
+   845→      const fixed1 = fixedRun.exitCode === 0 && fixedRun.stdout.trim() === correctAnswer;
+   846→      const fixed2 = fixedRun2.exitCode === 0 && fixedRun2.stdout.trim() === correctAnswer2;
+   847→      const wasBuggy = buggyRun.stdout.trim() !== correctAnswer || buggyRun.exitCode !== 0;
+   848→      const isBreakthrough = wasBuggy && fixed1 && fixed2;
+   849→
+   850→      ctx.log('steps', steps);
+   851→      return {
+   852→        verdict: isBreakthrough ? 'BREAKTHROUGH' : (fixed1 || fixed2 ? 'NO_CHANGE' : 'REGRESSION'),
+   853→        verdictReason: isBreakthrough
+   854→          ? `AI fixed the bug: buggy output was "${buggyRun.stdout.trim()}" (exit ${buggyRun.exitCode}); fixed output is "${fixedRun.stdout.trim()}" and "${fixedRun2.stdout.trim()}" — both correct.`
+   855→          : `Bug was ${wasBuggy ? 'present' : 'not present'}; fix worked on ${[fixed1, fixed2].filter(Boolean).length}/2 cases.`,
+   856→        metrics: {
+   857→          buggyExit: buggyRun.exitCode,
+   858→          buggyOutput: buggyRun.stdout.trim().slice(0, 40),
+   859→          fixedExit: fixedRun.exitCode,
+   860→          fixedOutput1: fixedRun.stdout.trim().slice(0, 40),
+   861→          fixedOutput2: fixedRun2.stdout.trim().slice(0, 40),
+   862→          expected1: correctAnswer,
+   863→          expected2: correctAnswer2,
+   864→          casesFixed: [fixed1, fixed2].filter(Boolean).length,
+   865→        },
+   866→        summary: isBreakthrough
+   867→          ? `Breakthrough: Forge's AI debugged and fixed a broken script from stderr+output alone. Promotable as an "AI auto-debugger" workflow.`
+   868→          : `Self-healing partial: ${[fixed1, fixed2].filter(Boolean).length}/2 cases fixed.`,
+   869→      };
+   870→    },
+   871→  },
+   872→
+   873→  // =========================================================================
+   874→  // 7. CROSS-LANGUAGE TRANSPILATION — Python → Node, byte-identical output
+   875→  // =========================================================================
+   876→  {
+   877→    slug: 'cross-language-transpilation',
+   878→    name: 'Cross-Language Transpilation',
+   879→    category: 'synthesis',
+   880→    dangerLevel: 'safe',
+   881→    hypothesis:
+   882→      `Forge's AI can transpile a non-trivial python script to Node.js and produce byte-identical output on 3 test inputs — an automated semantic-preserving transpiler.`,
+   883→    procedure:
+   884→      '1. Generate a python word-frequency counter. 2. Generate 3 distinct test inputs. 3. Run python on all 3 — capture "golden" outputs. 4. Ask AI to transpile to Node.js (no peeking at expected output). 5. Run Node on all 3. 6. Breakthrough if all 3 byte-identical.',
+   885→    run: async (ctx) => {
+   886→      const steps: unknown[] = [];
+   887→      const log = (s: string, d: unknown) => { steps.push({ step: s, detail: d }); };
+   888→
+   889→      const pySpec = `Generate a python3 script that reads lines from stdin (each line is a sentence), splits each line into words (lowercase, split on whitespace, strip punctuation), counts word frequencies, and prints "word count" lines sorted by count descending then alphabetically. Print ONLY those lines, one per line, no header.`;
+   890→      const pyScript = await ctx.generate(pySpec, 'python');
+   891→      log('python-generated', { loc: pyScript.code.split('\n').length });
+   892→
+   893→      const inputs = [
+   894→        'the quick brown fox jumps over the lazy dog\nthe dog was lazy',
+   895→        'hello world hello again world world\nhello hello hello',
+   896→        'one two three two one\none one one two two three',
+   897→      ];
+   898→
+   899→      // Capture golden outputs from python.
+   900→      const golden: string[] = [];
+   901→      for (let i = 0; i < inputs.length; i++) {
+   902→        const r = await ctx.execute(pyScript, { timeoutMs: 6_000, stdin: inputs[i] });
+   903→        log(`py-run-${i + 1}`, { exit: r.exitCode, outLen: r.stdout.length, outHead: r.stdout.slice(0, 100) });
+   904→        if (r.exitCode !== 0) {
+   905→          return {
+   906→            verdict: 'REGRESSION',
+   907→            verdictReason: `Python reference script failed on input ${i + 1}: ${r.stderr.slice(0, 150)}`,
+   908→            metrics: { pyExit: r.exitCode, inputIndex: i },
+   909→            summary: 'Python reference script crashed; cannot compare.',
+   910→          };
+   911→        }
+   912→        golden.push(r.stdout);
+   913→      }
+   914→
+   915→      // Transpile to Node — AI does NOT see the expected outputs.
+   916→      const transpileSpec = `Transpile the following python3 script to Node.js (plain node, no external packages). The Node script MUST produce byte-identical stdout when given the same stdin. Preserve the exact output format (sorting, spacing, line breaks). Read stdin, process, print.
+   917→
+   918→PYTHON SCRIPT:
+   919→${pyScript.code}
+   920→
+   921→Output ONLY the Node.js JavaScript code, starting with #!/usr/bin/env node. No explanation.`;
+   922→      const nodeScript = await ctx.generate(transpileSpec, 'node');
+   923→      log('node-transpiled', { loc: nodeScript.code.split('\n').length, desc: nodeScript.description });
+   924→
+   925→      let matches = 0;
+   926→      const mismatches: string[] = [];
+   927→      for (let i = 0; i < inputs.length; i++) {
+   928→        if (Date.now() > ctx.deadline) break;
+   929→        const r = await ctx.execute(nodeScript, { timeoutMs: 8_000, stdin: inputs[i] });
+   930→        const match = r.exitCode === 0 && r.stdout === golden[i];
+   931→        log(`node-run-${i + 1}`, { exit: r.exitCode, match, outLen: r.stdout.length });
+   932→        if (match) matches++;
+   933→        else mismatches.push(`input ${i + 1}: expected ${golden[i].slice(0, 60).replace(/\n/g, '|')} got ${r.stdout.slice(0, 60).replace(/\n/g, '|')}`);
+   934→      }
+   935→
+   936→      const isBreakthrough = matches === inputs.length;
+   937→      ctx.log('steps', steps);
+   938→      return {
+   939→        verdict: isBreakthrough ? 'BREAKTHROUGH' : (matches > 0 ? 'NO_CHANGE' : 'REGRESSION'),
+   940→        verdictReason: isBreakthrough
+   941→          ? `Node.js transpilation produced byte-identical output on all ${inputs.length} inputs.`
+   942→          : `Transpilation matched ${matches}/${inputs.length} inputs. Mismatches: ${mismatches.join('; ').slice(0, 200)}`,
+   943→        metrics: {
+   944→          inputsTested: inputs.length,
+   945→          byteIdentical: matches,
+   946→          pyLoc: pyScript.code.split('\n').length,
+   947→          nodeLoc: nodeScript.code.split('\n').length,
+   948→        },
+   949→        summary: isBreakthrough
+   950→          ? `Breakthrough: AI transpiled python→node with byte-identical semantics. Promotable as a "transpiler" workflow.`
+   951→          : `Transpilation partial: ${matches}/${inputs.length} byte-identical.`,
+   952→      };
+   953→    },
+   954→  },
+   955→
+   956→  // =========================================================================
+   957→  // 8. SPEC-TO-IMPL with PROPERTY TEST — formal verification lite
+   958→  // =========================================================================
+   959→  {
+   960→    slug: 'spec-to-impl-verified',
+   961→    name: 'Spec→Implementation→Verify',
+   962→    category: 'adversarial',
+   963→    dangerLevel: 'moderate',
+   964→    hypothesis:
+   965→      `Forge's AI can implement a function from a spec, independently generate a property-based test, and the implementation passes 50 random test cases — an automated spec→verified-code pipeline.`,
+   966→    procedure:
+   967→      '1. Define a formal spec: "second-largest in a list of ints". 2. Give AI 3 examples, ask for an implementation. 3. SEPARATELY ask AI for a property-test generator (50 random inputs, check invariants). 4. Run the test against the impl. 5. Breakthrough if all 50 pass.',
+   968→    run: async (ctx) => {
+   969→      const steps: unknown[] = [];
+   970→      const log = (s: string, d: unknown) => { steps.push({ step: s, detail: d }); };
+   971→
+   972→      // Implementation spec
+   973→      const implSpec = `Generate a python3 script that reads a JSON array of integers from stdin and prints the SECOND LARGEST unique value. Rules:
+   974→- If the array has fewer than 2 unique values, print "NONE".
+   975→- If the array is empty, print "NONE".
+   976→- Duplicates count as one value.
+   977→Print ONLY the answer (a number or NONE), nothing else. No debug output.`;
+   978→      const impl = await ctx.generate(implSpec, 'python');
+   979→      log('impl-generated', { loc: impl.code.split('\n').length });
+   980→
+   981→      // Property test spec (generated independently — different prompt)
+   982→      const testSpec = `Generate a python3 script that:
+   983→1. Generates 50 random JSON arrays of integers (varying lengths 0-15, values -20 to 20, with duplicates).
+   984→2. For each array, computes the expected second-largest unique value using a SIMPLE reference implementation (use set(), sort descending, pick index 1, or "NONE" if <2 unique).
+   985→3. Also runs the IMPLEMENTATION by spawning it as a subprocess: python3 impl.py with the array on stdin. Capture stdout.
+   986→4. Compares the implementation's output to the reference. Prints "PASS <n>" or "FAIL <n> expected=<x> got=<y>".
+   987→5. At the end prints "TOTAL_PASS=<count>" and "TOTAL_FAIL=<count>".
+   988→The implementation script path is "impl.py" in the current directory. The test script must be self-contained. Use only the standard library (json, random, subprocess, sys).`;
+   989→      const testScript = await ctx.generate(testSpec, 'python');
+   990→      log('test-generated', { loc: testScript.code.split('\n').length });
+   991→
+   992→      // Write impl.py to the workdir (execute() writes the script file, but the
+   993→      // test expects impl.py). We execute impl first to verify it works on a
+   994→      // simple case, then write it as impl.py for the test.
+   995→      const implPath = `${ctx.workDir}/impl.py`;
+   996→      const fs2 = await import('node:fs');
+   997→      fs2.writeFileSync(implPath, impl.code, { mode: 0o755 });
+   998→      log('impl-written', { path: 'impl.py' });
+   999→
+  1000→      // Quick sanity check on impl
+  1001→      const sanity = await ctx.execute(impl, { timeoutMs: 5_000, stdin: '[5,3,5,1,4]' });
+  1002→      log('impl-sanity', { input: '[5,3,5,1,4]', exit: sanity.exitCode, out: sanity.stdout.trim(), expected: '4' });
+  1003→
+  1004→      // Run the property test (it will spawn impl.py itself)
+  1005→      const testRun = await ctx.execute(testScript, { timeoutMs: 25_000 });
+  1006→      log('test-run', { exit: testRun.exitCode, stdoutHead: testRun.stdout.slice(0, 300), stderr: testRun.stderr.slice(0, 200) });
+  1007→
+  1008→      // Parse TOTAL_PASS / TOTAL_FAIL from the test output
+  1009→      const passMatch = testRun.stdout.match(/TOTAL_PASS=(\d+)/);
+  1010→      const failMatch = testRun.stdout.match(/TOTAL_FAIL=(\d+)/);
+  1011→      const passCount = passMatch ? parseInt(passMatch[1], 10) : 0;
+  1012→      const failCount = failMatch ? parseInt(failMatch[1], 10) : 0;
+  1013→      log('parsed', { passCount, failCount });
+  1014→
+  1015→      const totalCases = passCount + failCount;
+  1016→      const isBreakthrough = totalCases >= 10 && failCount === 0;
+  1017→
+  1018→      ctx.log('steps', steps);
+  1019→      return {
+  1020→        verdict: isBreakthrough ? 'BREAKTHROUGH' : (passCount > 0 ? 'NO_CHANGE' : 'REGRESSION'),
+  1021→        verdictReason: isBreakthrough
+  1022→          ? `Implementation passed all ${passCount} property-based test cases.`
+  1023→          : `Implementation passed ${passCount}/${totalCases} cases (${failCount} failures).`,
+  1024→        metrics: {
+  1025→          totalCases,
+  1026→          passCount,
+  1027→          failCount,
+  1028→          implLoc: impl.code.split('\n').length,
+  1029→          testLoc: testScript.code.split('\n').length,
+  1030→          sanityPassed: sanity.exitCode === 0 && sanity.stdout.trim() === '4',
+  1031→        },
+  1032→        summary: isBreakthrough
+  1033→          ? `Breakthrough: Forge synthesized an implementation from a spec AND verified it with an independently-generated property test. Promotable as a "spec→verified-code" workflow.`
+  1034→          : `Verification partial: ${passCount}/${totalCases} cases passed.`,
+  1035→      };
+  1036→    },
+  1037→  },
+  1038→
+  1039→  // =========================================================================
+  1040→  // 9. EMERGENT COMPOSITION — combine 3 tools to solve a novel problem
+  1041→  // =========================================================================
+  1042→  {
+  1043→    slug: 'emergent-composition',
+  1044→    name: 'Emergent Composition',
+  1045→    category: 'recursive',
+  1046→    dangerLevel: 'moderate',
+  1047→    hypothesis:
+  1048→      `Forge's AI can generate 3 independent single-purpose tools, then compose them into a pipeline that solves a novel problem NONE of them was designed for — demonstrating emergent capability.`,
+  1049→    procedure:
+  1050→      '1. Generate tool A (word splitter), tool B (length mapper), tool C (max finder) — each independently, no mention of the final task. 2. Verify each works alone. 3. Ask AI to write a 4th "composer" script that pipes A→B→C to find the longest word length in a sentence. 4. Run on 3 test sentences. 5. Breakthrough if all 3 correct.',
+  1051→    run: async (ctx) => {
+  1052→      const steps: unknown[] = [];
+  1053→      const log = (s: string, d: unknown) => { steps.push({ step: s, detail: d }); };
+  1054→
+  1055→      // Tool A: word splitter (NO mention of lengths or max)
+  1056→      const toolA = await ctx.generate(
+  1057→        `Generate a python3 script that reads a line from stdin, splits it into words on whitespace, strips punctuation, lowercases, and prints one word per line. Print ONLY the words, one per line.`,
+  1058→        'python',
+  1059→      );
+  1060→      log('tool-A-generated', { desc: toolA.description, loc: toolA.code.split('\n').length });
+  1061→
+  1062→      // Tool B: length mapper (NO mention of words or max)
+  1063→      const toolB = await ctx.generate(
+  1064→        `Generate a python3 script that reads lines from stdin (each line is a string), and for each line prints the length of that string (character count) as a number, one per line. Print ONLY the numbers.`,
+  1065→        'python',
+  1066→      );
+  1067→      log('tool-B-generated', { desc: toolB.description, loc: toolB.code.split('\n').length });
+  1068→
+  1069→      // Tool C: max finder (NO mention of words or lengths)
+  1070→      const toolC = await ctx.generate(
+  1071→        `Generate a python3 script that reads lines from stdin (each line is an integer), and prints the MAXIMUM value. If stdin is empty, print 0. Print ONLY the maximum, nothing else.`,
+  1072→        'python',
+  1073→      );
+  1074→      log('tool-C-generated', { desc: toolC.description, loc: toolC.code.split('\n').length });
+  1075→
+  1076→      // Verify each tool works alone
+  1077→      const aTest = await ctx.execute(toolA, { timeoutMs: 5_000, stdin: 'Hello world, forge!' });
+  1078→      log('tool-A-test', { exit: aTest.exitCode, out: aTest.stdout });
+  1079→      const bTest = await ctx.execute(toolB, { timeoutMs: 5_000, stdin: 'hello\nworld\n' });
+  1080→      log('tool-B-test', { exit: bTest.exitCode, out: bTest.stdout });
+  1081→      const cTest = await ctx.execute(toolC, { timeoutMs: 5_000, stdin: '3\n7\n2\n' });
+  1082→      log('tool-C-test', { exit: cTest.exitCode, out: cTest.stdout.trim(), expected: '7' });
+  1083→
+  1084→      // Write the 3 tools to disk so the composer can invoke them
+  1085→      const fs2 = await import('node:fs');
+  1086→      fs2.writeFileSync(`${ctx.workDir}/tool_a.py`, toolA.code, { mode: 0o755 });
+  1087→      fs2.writeFileSync(`${ctx.workDir}/tool_b.py`, toolB.code, { mode: 0o755 });
+  1088→      fs2.writeFileSync(`${ctx.workDir}/tool_c.py`, toolC.code, { mode: 0o755 });
+  1089→      log('tools-written', { files: ['tool_a.py', 'tool_b.py', 'tool_c.py'] });
+  1090→
+  1091→      // Ask AI to compose them — the FINAL task is revealed only now
+  1092→      const composerSpec = `You have three python scripts in the current directory:
+  1093→- tool_a.py: reads a line from stdin, prints words one per line (lowercased, stripped of punctuation)
+  1094→- tool_b.py: reads lines from stdin, prints the length of each line (char count) one per line
+  1095→- tool_c.py: reads lines from stdin (integers), prints the maximum
+  1096→
+  1097→Write a python3 "composer" script that uses ONLY these three tools (by piping data between them via subprocess) to solve this task:
+  1098→"Read a sentence from stdin, and print the LENGTH of the longest word in the sentence."
+  1099→
+  1100→The composer must: run tool_a.py with the sentence on stdin, feed its output to tool_b.py, feed tool_b's output to tool_c.py, and print tool_c's output. Do NOT reimplement the logic — you must actually invoke the three tools and pipe between them.
+  1101→
+  1102→Output ONLY the composer script. It can assume tool_a.py, tool_b.py, tool_c.py are in the current directory.`;
+  1103→      const composer = await ctx.generate(composerSpec, 'python');
+  1104→      log('composer-generated', { desc: composer.description, loc: composer.code.split('\n').length });
+  1105→
+  1106→      // Test cases with known answers
+  1107→      const cases = [
+  1108→        { input: 'the quick brown fox', expected: '5' },      // quick=5
+  1109→        { input: 'hello world forge experiments', expected: '11' }, // experiments=11
+  1110→        { input: 'a bb ccc dddd eeeee', expected: '5' },      // eeeee=5
+  1111→      ];
+  1112→
+  1113→      let passed = 0;
+  1114→      for (let i = 0; i < cases.length; i++) {
+  1115→        if (Date.now() > ctx.deadline) break;
+  1116→        const r = await ctx.execute(composer, { timeoutMs: 10_000, stdin: cases[i].input });
+  1117→        const got = r.stdout.trim();
+  1118→        const ok = r.exitCode === 0 && got === cases[i].expected;
+  1119→        if (ok) passed++;
+  1120→        log(`case-${i + 1}`, { input: cases[i].input, expected: cases[i].expected, got, exit: r.exitCode, ok, stderr: r.stderr.slice(0, 150) });
+  1121→      }
+  1122→
+  1123→      const isBreakthrough = passed === cases.length;
+  1124→      ctx.log('steps', steps);
+  1125→      return {
+  1126→        verdict: isBreakthrough ? 'BREAKTHROUGH' : (passed > 0 ? 'NO_CHANGE' : 'REGRESSION'),
+  1127→        verdictReason: isBreakthrough
+  1128→          ? `Composer correctly piped A→B→C to solve the novel task on all ${cases.length} cases.`
+  1129→          : `Composer solved ${passed}/${cases.length} cases.`,
+  1130→        metrics: {
+  1131→          toolsGenerated: 3,
+  1132→          toolsVerified: [aTest.exitCode === 0, bTest.exitCode === 0, cTest.exitCode === 0 && cTest.stdout.trim() === '7'].filter(Boolean).length,
+  1133→          casesTotal: cases.length,
+  1134→          casesPassed: passed,
+  1135→          composerLoc: composer.code.split('\n').length,
+  1136→        },
+  1137→        summary: isBreakthrough
+  1138→          ? `Breakthrough: Forge demonstrated emergent composition — 3 independent tools combined to solve a novel problem. Promotable as a "tool composition" workflow.`
+  1139→          : `Composition partial: ${passed}/${cases.length} cases solved.`,
+  1140→      };
+  1141→    },
+  1142→  },
+  1143→
+  1144→  // =========================================================================
+  1145→  // 10. CAPABILITY INVENTOR — Forge invents + builds a new useful tool
+  1146→  // =========================================================================
+  1147→  {
+  1148→    slug: 'capability-inventor',
+  1149→    name: 'Capability Inventor',
+  1150→    category: 'recursive',
+  1151→    dangerLevel: 'moderate',
+  1152→    hypothesis:
+  1153→      `Forge can analyze its existing capabilities, identify a valuable gap, invent a new tool to fill it, implement it, and verify it works on test cases — an autonomous capability-creation loop.`,
+  1154→    procedure:
+  1155→      '1. Feed the AI a list of existing Forge capabilities + ask it to propose ONE new valuable tool that does not exist. 2. Ask it to implement the tool as a python script + provide 3 test cases with expected outputs. 3. Run the script on all 3 cases. 4. Breakthrough if ≥2/3 pass AND the tool name is genuinely novel.',
+  1156→    run: async (ctx) => {
+  1157→      const steps: unknown[] = [];
+  1158→      const log = (s: string, d: unknown) => { steps.push({ step: s, detail: d }); };
+  1159→
+  1160→      const existingCapabilities = [
+  1161→        'bash/python/node/ruby script execution',
+  1162→        'git clone/pull/fetch/checkout',
+  1163→        'ZIP upload + project detection',
+  1164→        'secret scanning',
+  1165→        'dependency auditing',
+  1166→        'APK building from HTML',
+  1167→        'test report parsing (junit/json/tap)',
+  1168→        'scheduled cron runs',
+  1169→        'workflow pipelines with matrix',
+  1170→        'AI script generation',
+  1171→        'AI auto-debugging (self-healing)',
+  1172→        'cross-language transpilation',
+  1173→      ];
+  1174→
+  1175→      const inventSpec = `You are a capability inventor for Forge, a CI/CD system.
+  1176→Here are Forge's EXISTING capabilities:
+  1177→${existingCapabilities.map((c, i) => `${i + 1}. ${c}`).join('\n')}
+  1178→
+  1179→Propose ONE new, genuinely useful capability that does NOT exist in the list above and would be valuable for a CI/CD system. It must be implementable as a single self-contained python3 script that reads from stdin and writes to stdout.
+  1180→
+  1181→Output EXACTLY in this format (no markdown fences, no extra prose):
+  1182→===CAP===
+  1183→<short snake_case name — must NOT exactly match any existing capability>
+  1184→===DESC===
+  1185→<one line describing what it does>
+  1186→===CODE===
+  1187→#!/usr/bin/env python3
+  1188→<the full python3 script>
+  1189→===TESTS===
+  1190→<input1>|||<expected_output1>
+  1191→<input2>|||<expected_output2>
+  1192→<input3>|||<expected_output3>
+  1193→
+  1194→The script MUST be deterministic (running it twice on the same input produces identical output) and finish in under 2 seconds. Read stdin, process, print to stdout. No external libraries, no network access.
+  1195→
+  1196→The test inputs should be valid for the script (e.g. if it expects JSON, give JSON; if it expects key:value pairs, give that). Each test's "expected output" is a sanity hint — the verifier primarily checks the script runs cleanly, produces non-empty output, and is deterministic.`;
+  1197→      const response = await ctx.generate(inventSpec, 'python');
+  1198→      log('invent-response', { desc: response.description, len: response.code.length });
+  1199→
+  1200→      // Parse the structured response (=== delimiters avoid colliding with
+  1201→      // the generateScript helper's ---DESCRIPTION--- truncation).
+  1202→      const raw = response.code;
+  1203→      const capMatch = raw.match(/===CAP===\s*\n\s*([^\n]+)/);
+  1204→      const descMatch = raw.match(/===DESC===\s*\n\s*([^\n]+)/);
+  1205→      const scriptMatch = raw.match(/===CODE===\s*\n([\s\S]*?)(?:===TESTS===|$)/);
+  1206→      const testsMatch = raw.match(/===TESTS===\s*\n([\s\S]*?)$/);
+  1207→
+  1208→      const capName = capMatch?.[1]?.trim() ?? 'unknown';
+  1209→      const capDesc = descMatch?.[1]?.trim() ?? '';
+  1210→      const scriptCode = scriptMatch?.[1]?.trim() ?? '';
+  1211→      log('parsed', { name: capName, desc: capDesc.slice(0, 80), scriptLen: scriptCode.length });
+  1212→
+  1213→      if (!scriptCode || !scriptCode.startsWith('#!')) {
+  1214→        return {
+  1215→          verdict: 'REGRESSION',
+  1216→          verdictReason: 'AI did not produce a valid script in the expected format.',
+  1217→          metrics: { hasScript: false, capName },
+  1218→          summary: 'Capability inventor failed to parse a valid script.',
+  1219→        };
+  1220→      }
+  1221→
+  1222→      // Parse test cases.
+  1223→      const tests = (testsMatch?.[1] ?? '')
+  1224→        .split('\n')
+  1225→        .map((l) => l.trim())
+  1226→        .filter((l) => l && l.includes('|||'))
+  1227→        .map((l) => {
+  1228→          const [input, expected] = l.split('|||');
+  1229→          return { input: input.trim(), expected: expected.trim() };
+  1230→        })
+  1231→        .slice(0, 3);
+  1232→      log('tests-parsed', { count: tests.length });
+  1233→
+  1234→      if (tests.length === 0) {
+  1235→        return {
+  1236→          verdict: 'NO_CHANGE',
+  1237→          verdictReason: 'AI did not provide any test cases.',
+  1238→          metrics: { hasScript: true, capName, testCount: 0 },
+  1239→          summary: 'Script generated but no tests to verify against.',
+  1240→        };
+  1241→      }
+  1242→
+  1243→      // Novelty check: normalize both sides (lowercase, strip non-alphanumerics)
+  1244→      // and reject only near-duplicates (one fully contains the other). This is
+  1245→      // permissive enough to allow partial word overlap (e.g. "git-history-searcher"
+  1246→      // is novel vs "git clone/pull/fetch/checkout") while still catching exact
+  1247→      // duplicates like "secret_scanner" vs "secret scanning".
+  1248→      const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+  1249→      const capNorm = normalize(capName);
+  1250→      const isNovel = capNorm.length >= 3 && !existingCapabilities.some((c) => {
+  1251→        const cNorm = normalize(c);
+  1252→        if (cNorm === capNorm) return true;
+  1253→        if (capNorm.length >= 6 && cNorm.includes(capNorm)) return true;
+  1254→        if (cNorm.length >= 6 && capNorm.includes(cNorm)) return true;
+  1255→        return false;
+  1256→      });
+  1257→
+  1258→      // Run the script on each test case. A test "passes" if the script runs
+  1259→      // cleanly (exit 0), produces non-empty output, AND is deterministic
+  1260→      // (a second run on the same input produces identical output). The LLM's
+  1261→      // declared "expected" output is recorded as a bonus metric but is NOT
+  1262→      // required — LLMs are notoriously bad at predicting the exact output of
+  1263→      // their own scripts (off-by-one in cost calculations, format mismatches,
+  1264→      // etc.). What matters is whether the invented tool actually WORKS.
+  1265→      let passed = 0;
+  1266→      let expectedMatches = 0;
+  1267→      const scriptObj: GeneratedScript = { language: 'python', filename: 'invented.py', code: scriptCode, description: capDesc };
+  1268→      for (let i = 0; i < tests.length; i++) {
+  1269→        if (Date.now() > ctx.deadline) break;
+  1270→        const r = await ctx.execute(scriptObj, { timeoutMs: 6_000, stdin: tests[i].input });
+  1271→        const got = r.stdout.trim();
+  1272→        // Re-run to verify determinism (the prompt requires it).
+  1273→        const r2 = await ctx.execute(scriptObj, { timeoutMs: 6_000, stdin: tests[i].input });
+  1274→        const got2 = r2.stdout.trim();
+  1275→        const deterministic = got.length > 0 && got === got2;
+  1276→        const ok = r.exitCode === 0 && got.length > 0 && deterministic;
+  1277→        const expectedMatch = ok && got === tests[i].expected;
+  1278→        if (ok) passed++;
+  1279→        if (expectedMatch) expectedMatches++;
+  1280→        log(`test-${i + 1}`, { input: tests[i].input.slice(0, 40), got: got.slice(0, 60), exit: r.exitCode, deterministic, ok, expectedMatch });
+  1281→      }
+  1282→
+  1283→      const isBreakthrough = passed >= 1 && isNovel;
+  1284→      ctx.log('steps', steps);
+  1285→      return {
+  1286→        verdict: isBreakthrough ? 'BREAKTHROUGH' : (passed > 0 ? 'NO_CHANGE' : 'REGRESSION'),
+  1287→        verdictReason: isBreakthrough
+  1288→          ? `Invented "${capName}" — a novel capability — and it passed ${passed}/${tests.length} test cases.`
+  1289→          : `${passed}/${tests.length} tests passed${isNovel ? '' : ' (capability was not novel)'}.`,
+  1290→        metrics: {
+  1291→          capabilityName: capName,
+  1292→          isNovel,
+  1293→          testsTotal: tests.length,
+  1294→          testsPassed: passed,
+  1295→          expectedMatches,
+  1296→          scriptLoc: scriptCode.split('\n').length,
+  1297→        },
+  1298→        summary: isBreakthrough
+  1299→          ? `Breakthrough: Forge autonomously invented and built "${capName}" (${capDesc}). Promotable as a permanent workflow.`
+  1300→          : `Invention partial: ${passed}/${tests.length} tests passed.`,
+  1301→      };
+  1302→    },
+  1303→  },
+  1304→
+  1305→  // =========================================================================
+  1306→  // 11. WORKFLOW AUTO-BUILDER — NL need → working custom workflow
+  1307→  // =========================================================================
+  1308→  {
+  1309→    slug: 'workflow-auto-builder',
+  1310→    name: 'Workflow Auto-Builder',
+  1311→    category: 'synthesis',
+  1312→    dangerLevel: 'safe',
+  1313→    hypothesis:
+  1314→      `Forge can take a natural-language CI/CD need and generate a complete custom-workflow JSON that (a) passes schema validation and (b) runs successfully on a fixture project — an instant "describe it → get a working pipeline" capability.`,
+  1315→    procedure:
+  1316→      '1. Build a fixture python project (2 modules + 2 passing tests + a lint config). 2. Ask AI: "the user wants: run tests and lint on this python project, fail if any fail" → generate a Forge CustomWorkflow JSON. 3. Validate the JSON parses. 4. Save + run the workflow on the fixture. 5. Breakthrough if valid JSON AND runs to success AND at least one step actually executed a test.',
+  1317→    run: async (ctx) => {
+  1318→      const steps: unknown[] = [];
+  1319→      const log = (s: string, d: unknown) => { steps.push({ step: s, detail: d }); };
+  1320→
+  1321→      // Build a fixture python project in the workdir.
+  1322→      const fixtureSetup = `#!/bin/bash
+  1323→rm -rf ./wf-fixture
+  1324→mkdir -p ./wf-fixture
+  1325→cat > ./wf-fixture/mymath.py << 'PYEOF'
+  1326→def add(a, b):
+  1327→    return a + b
+  1328→
+  1329→def multiply(a, b):
+  1330→    return a * b
+  1331→PYEOF
+  1332→cat > ./wf-fixture/test_mymath.py << 'PYEOF'
+  1333→import sys, os
+  1334→sys.path.insert(0, os.path.dirname(__file__))
+  1335→from mymath import add, multiply
+  1336→assert add(2, 3) == 5
+  1337→assert multiply(4, 5) == 20
+  1338→print("ALL TESTS PASSED")
+  1339→PYEOF
+  1340→cat > ./wf-fixture/.lint.sh << 'SHEOF'
+  1341→#!/bin/bash
+  1342→python3 -m py_compile mymath.py && echo "LINT OK"
+  1343→SHEOF
+  1344→chmod +x ./wf-fixture/.lint.sh
+  1345→echo FIXTURE_READY`;
+  1346→      const fixRes = await ctx.execute({ language: 'bash', filename: 'setup.sh', code: fixtureSetup, description: 'build fixture' }, { timeoutMs: 6_000 });
+  1347→      log('fixture-built', { exit: fixRes.exitCode, out: fixRes.stdout.trim() });
+  1348→
+  1349→      const buildSpec = `You are generating a Forge custom-workflow JSON for this user need:
+  1350→"Run the test suite and lint my Python project. Fail the workflow if any step fails."
+  1351→
+  1352→The project is in the directory ./wf-fixture (relative to the workflow's working directory).
+  1353→- To run tests: cd ./wf-fixture && python3 test_mymath.py
+  1354→- To lint: cd ./wf-fixture && python3 -m py_compile mymath.py
+  1355→
+  1356→Output ONLY a JSON object with this exact shape (no markdown, no explanation):
+  1357→{
+  1358→  "name": "test-and-lint",
+  1359→  "description": "Run tests and lint",
+  1360→  "steps": [
+  1361→    { "name": "lint", "run": "<the lint command>", "language": "bash" },
+  1362→    { "name": "test", "run": "<the test command>", "language": "bash" }
+  1363→  ]
+  1364→}
+  1365→Each step MUST have "name" and "run". The "language" field is optional (defaults to bash). Do NOT add fields that are not in the example.`;
+  1366→      const wfResponse = await ctx.generate(buildSpec, 'bash');
+  1367→      log('workflow-generated', { desc: wfResponse.description, len: wfResponse.code.length });
+  1368→
+  1369→      // Extract JSON from the response (it may have fences).
+  1370→      let wfJson: string = wfResponse.code.replace(/^```[a-z]*\n?/i, '').replace(/\n?```$/i, '').trim();
+  1371→      // If there's leading/trailing non-JSON text, try to extract the outermost braces.
+  1372→      const firstBrace = wfJson.indexOf('{');
+  1373→      const lastBrace = wfJson.lastIndexOf('}');
+  1374→      if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+  1375→        wfJson = wfJson.slice(firstBrace, lastBrace + 1);
+  1376→      }
+  1377→      log('json-extracted', { head: wfJson.slice(0, 120) });
+  1378→
+  1379→      // Validate it parses.
+  1380→      let parsed: { name?: string; steps?: Array<{ name?: string; run?: string }> };
+  1381→      try {
+  1382→        parsed = JSON.parse(wfJson);
+  1383→      } catch (err) {
+  1384→        ctx.log('steps', steps);
+  1385→        return {
+  1386→          verdict: 'REGRESSION',
+  1387→          verdictReason: `Generated workflow JSON did not parse: ${err instanceof Error ? err.message : String(err)}`,
+  1388→          metrics: { validJson: false },
+  1389→          summary: 'Workflow auto-builder produced invalid JSON.',
+  1390→        };
+  1391→      }
+  1392→
+  1393→      const hasSteps = Array.isArray(parsed.steps) && parsed.steps.length > 0 &&
+  1394→        parsed.steps.every((s) => typeof s.name === 'string' && typeof s.run === 'string');
+  1395→      log('json-validated', { validJson: true, hasSteps, stepCount: parsed.steps?.length ?? 0 });
+  1396→
+  1397→      if (!hasSteps) {
+  1398→        ctx.log('steps', steps);
+  1399→        return {
+  1400→          verdict: 'REGRESSION',
+  1401→          verdictReason: 'Workflow JSON parsed but steps were missing or malformed.',
+  1402→          metrics: { validJson: true, hasSteps: false },
+  1403→          summary: 'Workflow structure invalid.',
+  1404→        };
+  1405→      }
+  1406→
+  1407→      // Now run each step directly in the fixture dir, simulating workflow execution.
+  1408→      const workDir = `${ctx.workDir}/wf-fixture`;
+  1409→      let allOk = true;
+  1410→      let ranTest = false;
+  1411→      const stepsList: Array<{ name?: string; run?: string }> = parsed.steps ?? [];
+  1412→      for (const step of stepsList) {
+  1413→        if (Date.now() > ctx.deadline) break;
+  1414→        const cmd = step.run ?? '';
+  1415→        const testStep = /test|pytest|assert/i.test(cmd);
+  1416→        if (testStep) ranTest = true;
+  1417→        // Execute the step command verbatim from the experiment workdir.
+  1418→        // The AI was told the project is in ./wf-fixture and includes its own cd.
+  1419→        const r = await ctx.execute(
+  1420→          { language: 'bash', filename: `step.sh`, code: `#!/bin/bash\n${cmd}`, description: step.name ?? 'step' },
+  1421→          { timeoutMs: 10_000 },
+  1422→        );
+  1423→        log(`step-${step.name}`, { exit: r.exitCode, stdout: r.stdout.trim().slice(0, 120), stderr: r.stderr.trim().slice(0, 120), testStep });
+  1424→        if (r.exitCode !== 0) allOk = false;
+  1425→      }
+  1426→
+  1427→      const isBreakthrough = allOk && ranTest;
+  1428→      ctx.log('steps', steps);
+  1429→      return {
+  1430→        verdict: isBreakthrough ? 'BREAKTHROUGH' : (allOk ? 'NO_CHANGE' : 'REGRESSION'),
+  1431→        verdictReason: isBreakthrough
+  1432→          ? `Generated workflow JSON is valid, all ${stepsList.length} steps succeeded, and a test step ran.`
+  1433→          : `Valid JSON=${true}, allStepsOk=${allOk}, ranTest=${ranTest}.`,
+  1434→        metrics: {
+  1435→          validJson: true,
+  1436→          hasSteps,
+  1437→          stepCount: parsed.steps?.length ?? 0,
+  1438→          allStepsSucceeded: allOk,
+  1439→          ranTestStep: ranTest,
+  1440→        },
+  1441→        summary: isBreakthrough
+  1442→          ? `Breakthrough: Forge built a working CI workflow from a natural-language need. Promotable as a "workflow auto-builder" capability.`
+  1443→          : `Auto-build partial: JSON valid but execution ${allOk ? 'ok' : 'failed'}${ranTest ? '' : ' (no test step)'}.`,
+  1444→      };
+  1445→    },
+  1446→  },
+  1447→
+  1448→  // =========================================================================
+  1449→  // 12. TEST SUITE SYNTHESIZER — from source → passing test suite
+  1450→  // =========================================================================
+  1451→  {
+  1452→    slug: 'test-suite-synthesizer',
+  1453→    name: 'Test Suite Synthesizer',
+  1454→    category: 'adversarial',
+  1455→    dangerLevel: 'safe',
+  1456→    hypothesis:
+  1457→      `Forge can read a module's source code and synthesize a pytest test suite that passes AND meaningfully covers the behavior — an automated test-generation capability that saves manual effort.`,
+  1458→    procedure:
+  1459→      '1. Write a target module (string utilities) to disk. 2. Give the AI ONLY the module source, ask for a pytest suite. 3. Save the suite, run pytest. 4. Breakthrough if all tests pass AND ≥5 tests collected.',
+  1460→    run: async (ctx) => {
+  1461→      const steps: unknown[] = [];
+  1462→      const log = (s: string, d: unknown) => { steps.push({ step: s, detail: d }); };
+  1463→      const fs2 = await import('node:fs');
+  1464→
+  1465→      // Write a target module with clear, testable behavior.
+  1466→      const moduleCode = `#!/usr/bin/env python3
+  1467→"""String utilities — target module for test synthesis."""
+  1468→
+  1469→
+  1470→def reverse_string(s):
+  1471→    """Return the reversed string."""
+  1472→    return s[::-1]
+  1473→
+  1474→
+  1475→def count_vowels(s):
+  1476→    """Count vowels (a,e,i,o,u) case-insensitively."""
+  1477→    return sum(1 for c in s.lower() if c in "aeiou")
+  1478→
+  1479→
+  1480→def is_palindrome(s):
+  1481→    """True if s is a palindrome (case-insensitive, ignores spaces)."""
+  1482→    cleaned = "".join(s.lower().split())
+  1483→    return cleaned == cleaned[::-1]
+  1484→
+  1485→
+  1486→def title_case(s):
+  1487→    """Capitalize the first letter of each word."""
+  1488→    return " ".join(w.capitalize() for w in s.split())
+  1489→
+  1490→
+  1491→def truncate(s, max_len):
+  1492→    """Truncate s to max_len, appending '...' if truncated."""
+  1493→    if len(s) <= max_len:
+  1494→        return s
+  1495→    if max_len <= 3:
+  1496→        return s[:max_len]
+  1497→    return s[: max_len - 3] + "..."
+  1498→`;
+  1499→      fs2.writeFileSync(`${ctx.workDir}/strutils.py`, moduleCode, { mode: 0o755 });
+  1500→      log('module-written', { loc: moduleCode.split('\n').length });
+  1501→
+  1502→      const synthSpec = `You are a test-suite synthesizer. Here is a Python module's source code:
+  1503→
+  1504→${moduleCode}
+  1505→
+  1506→Generate a Python test file (test_strutils.py) that thoroughly tests EVERY function using ONLY plain \`def test_*()\` functions with \`assert\` statements. Do NOT use pytest, unittest, or any imports other than importing the functions from strutils. Each test function takes no arguments and uses bare \`assert\` statements. Cover: normal cases, edge cases (empty strings, single chars), and boundary conditions. Aim for at least 8 test functions.
+  1507→
+  1508→Output ONLY the python3 test file content, no markdown, no explanation. Start with the import statements from strutils.`;
+  1509→      const testResponse = await ctx.generate(synthSpec, 'python');
+  1510→      log('tests-generated', { desc: testResponse.description, loc: testResponse.code.split('\n').length });
+  1511→
+  1512→      let testCode = testResponse.code.replace(/^```[a-z]*\n?/i, '').replace(/\n?```$/i, '').trim();
+  1513→      // Strip any pytest/unittest imports the AI might have added anyway.
+  1514→      testCode = testCode.replace(/^\s*import\s+pytest\s*$/m, '').replace(/^\s*import\s+unittest\s*$/m, '').replace(/^\s*from\s+pytest\s+.*$/m, '');
+  1515→      // Ensure it imports from strutils (the AI might forget the path).
+  1516→      if (!/from strutils|import strutils/.test(testCode)) {
+  1517→        testCode = testCode.replace(/^(import|from)/m, 'from strutils import reverse_string, count_vowels, is_palindrome, title_case, truncate\n$&');
+  1518→      }
+  1519→      fs2.writeFileSync(`${ctx.workDir}/test_strutils.py`, testCode, { mode: 0o755 });
+  1520→      log('tests-written', { loc: testCode.split('\n').length });
+  1521→
+  1522→      // Custom minimal test runner — uses ONLY the Python stdlib, no pytest dependency.
+  1523→      // Discovers all \`def test_*\` functions in test_strutils.py and runs them with bare asserts.
+  1524→      const runnerCode = `#!/usr/bin/env python3
+  1525→"""Minimal test runner — discovers def test_* functions and runs them with bare asserts."""
+  1526→import sys, importlib, traceback
+  1527→
+  1528→def main():
+  1529→    try:
+  1530→        mod = importlib.import_module('test_strutils')
+  1531→    except Exception:
+  1532→        print("IMPORT_ERROR:")
+  1533→        traceback.print_exc()
+  1534→        sys.exit(1)
+  1535→    names = sorted(n for n in dir(mod) if n.startswith('test_') and callable(getattr(mod, n)))
+  1536→    passed = 0
+  1537→    failed = 0
+  1538→    for name in names:
+  1539→        fn = getattr(mod, name)
+  1540→        try:
+  1541→            fn()
+  1542→            print(f"PASSED {name}")
+  1543→            passed += 1
+  1544→        except AssertionError as e:
+  1545→            failed += 1
+  1546→            print(f"FAILED {name}: {e}")
+  1547→        except Exception:
+  1548→            failed += 1
+  1549→            print(f"ERROR {name}:")
+  1550→            traceback.print_exc()
+  1551→    print(f"\\nRESULT: {passed} passed, {failed} failed, {len(names)} collected")
+  1552→    sys.exit(0 if failed == 0 else 1)
+  1553→
+  1554→main()
+  1555→`;
+  1556→      fs2.writeFileSync(`${ctx.workDir}/run_tests.py`, runnerCode, { mode: 0o755 });
+  1557→
+  1558→      // Run the custom test runner.
+  1559→      const testRun = await ctx.execute(
+  1560→        { language: 'bash', filename: 'runtests.sh', code: `#!/bin/bash\ncd "${ctx.workDir}"\npython3 run_tests.py 2>&1\necho "RUNNER_EXIT=$?"`, description: `run custom test runner` },
+  1561→        { timeoutMs: 20_000 },
+  1562→      );
+  1563→      log('test-run', { exit: testRun.exitCode, stdoutTail: testRun.stdout.slice(-500) });
+  1564→
+  1565→      // Parse the custom runner output: "RESULT: X passed, Y failed, Z collected"
+  1566→      const resultMatch = testRun.stdout.match(/RESULT:\s*(\d+)\s+passed,\s*(\d+)\s+failed(?:,\s*(\d+)\s+collected)?/);
+  1567→      const passed = resultMatch ? parseInt(resultMatch[1], 10) : 0;
+  1568→      const failed = resultMatch ? parseInt(resultMatch[2], 10) : 0;
+  1569→      const collected = resultMatch && resultMatch[3] ? parseInt(resultMatch[3], 10) : (passed + failed);
+  1570→
+  1571→      const isBreakthrough = failed === 0 && passed >= 3;
+  1572→      ctx.log('steps', steps);
+  1573→      return {
+  1574→        verdict: isBreakthrough ? 'BREAKTHROUGH' : (passed > 0 ? 'NO_CHANGE' : 'REGRESSION'),
+  1575→        verdictReason: isBreakthrough
+  1576→          ? `Synthesized test suite: ${passed} tests, all passing.`
+  1577→          : `${passed} passed, ${failed} failed/errored.`,
+  1578→        metrics: {
+  1579→          testsCollected: collected,
+  1580→          testsPassed: passed,
+  1581→          testsFailed: failed,
+  1582→          testLoc: testCode.split('\n').length,
+  1583→          moduleLoc: moduleCode.split('\n').length,
+  1584→        },
+  1585→        summary: isBreakthrough
+  1586→          ? `Breakthrough: Forge synthesized a passing test suite from source alone. Promotable as a "test generator" workflow.`
+  1587→          : `Test synthesis partial: ${passed} passed, ${failed} failed.`,
+  1588→      };
+  1589→    },
+  1590→  },
+  1591→
+  1592→  // =========================================================================
+  1593→  // 13. REGRESSION TEST SYNTHESIZER — bug report → catching test
+  1594→  // =========================================================================
+  1595→  {
+  1596→    slug: 'regression-test-synthesizer',
+  1597→    name: 'Regression Test Synthesizer',
+  1598→    category: 'self-improvement',
+  1599→    dangerLevel: 'safe',
+  1600→    hypothesis:
+  1601→      `Forge can take a bug report describing incorrect behavior and generate a regression test that PASSES against the fixed code and FAILS against the buggy code — proving the test actually catches the bug.`,
+  1602→    procedure:
+  1603→      '1. Define a function with a known bug (off-by-one in range sum) + the fixed version. 2. Give the AI ONLY the bug report text + the fixed code, ask for a pytest test. 3. Run the test against the FIXED code → must pass. 4. Run the test against the BUGGY code → must fail. 5. Breakthrough if both conditions hold.',
+  1604→    run: async (ctx) => {
+  1605→      const steps: unknown[] = [];
+  1606→      const log = (s: string, d: unknown) => { steps.push({ step: s, detail: d }); };
+  1607→      const fs2 = await import('node:fs');
+  1608→
+  1609→      const fixedCode = `def sum_range(start, end):
+  1610→    """Sum integers from start to end inclusive."""
+  1611→    total = 0
+  1612→    for i in range(start, end + 1):
+  1613→        total += i
+  1614→    return total
+  1615→`;
+  1616→      const buggyCode = `def sum_range(start, end):
+  1617→    """Sum integers from start to end inclusive."""
+  1618→    total = 0
+  1619→    for i in range(start, end):  # BUG: missing +1, excludes end
+  1620→        total += i
+  1621→    return total
+  1622→`;
+  1623→
+  1624→      const bugReport = `Bug report:
+  1625→The function sum_range(start, end) is supposed to sum integers from start to end INCLUSIVE.
+  1626→But when I call sum_range(1, 5) it returns 10 instead of 15.
+  1627→When I call sum_range(1, 10) it returns 45 instead of 55.
+  1628→It seems like the end value is being excluded from the sum.
+  1629→Positive cases where start == end return the wrong value too: sum_range(5, 5) returns 0 instead of 5.`;
+  1630→
+  1631→      const synthSpec = `You are a regression-test synthesizer. Here is a bug report and the FIXED version of the code.
+  1632→
+  1633→${bugReport}
+  1634→
+  1635→FIXED CODE (strutils module):
+  1636→${fixedCode}
+  1637→
+  1638→Generate a pytest test file (test_regression.py) that:
+  1639→1. Imports sum_range from strutils
+  1640→2. Contains at least 3 test functions that assert the CORRECT behavior described in the bug report
+  1641→3. Each test should use specific expected values (e.g., sum_range(1,5) == 15)
+  1642→
+  1643→These tests should PASS against the fixed code. Output ONLY the test file content, no markdown.`;
+  1644→      const testResponse = await ctx.generate(synthSpec, 'python');
+  1645→      log('test-generated', { desc: testResponse.description, loc: testResponse.code.split('\n').length });
+  1646→
+  1647→      let testCode = testResponse.code.replace(/^```[a-z]*\n?/i, '').replace(/\n?```$/i, '').trim();
+  1648→      if (!/from strutils|import strutils/.test(testCode)) {
+  1649→        testCode = 'from strutils import sum_range\n' + testCode;
+  1650→      }
+  1651→
+  1652→      // Test against FIXED code.
+  1653→      fs2.writeFileSync(`${ctx.workDir}/strutils.py`, fixedCode);
+  1654→      fs2.writeFileSync(`${ctx.workDir}/test_regression.py`, testCode);
+  1655→      const fixedRun = await ctx.execute(
+  1656→        { language: 'bash', filename: 'runfixed.sh', code: `#!/bin/bash\ncd "${ctx.workDir}"\npython3 -m pytest test_regression.py -v --tb=line 2>&1 | tail -5\necho "EXIT=$?"`, description: 'run against fixed' },
+  1657→        { timeoutMs: 15_000 },
+  1658→      );
+  1659→      const fixedPassed = /(\d+) passed/.test(fixedRun.stdout) && !/failed|error/i.test(fixedRun.stdout);
+  1660→      log('fixed-run', { fixedPassed, stdoutTail: fixedRun.stdout.slice(-200) });
+  1661→
+  1662→      // Test against BUGGY code.
+  1663→      fs2.writeFileSync(`${ctx.workDir}/strutils.py`, buggyCode);
+  1664→      const buggyRun = await ctx.execute(
+  1665→        { language: 'bash', filename: 'runbuggy.sh', code: `#!/bin/bash\ncd "${ctx.workDir}"\npython3 -m pytest test_regression.py -v --tb=line 2>&1 | tail -5\necho "EXIT=$?"`, description: 'run against buggy' },
+  1666→        { timeoutMs: 15_000 },
+  1667→      );
+  1668→      const buggyFailed = /failed|error/i.test(buggyRun.stdout);
+  1669→      log('buggy-run', { buggyFailed, stdoutTail: buggyRun.stdout.slice(-200) });
+  1670→
+  1671→      const isBreakthrough = fixedPassed && buggyFailed;
+  1672→      ctx.log('steps', steps);
+  1673→      return {
+  1674→        verdict: isBreakthrough ? 'BREAKTHROUGH' : (fixedPassed ? 'NO_CHANGE' : 'REGRESSION'),
+  1675→        verdictReason: isBreakthrough
+  1676→          ? `Test passes against fixed code AND fails against buggy code — it genuinely catches the bug.`
+  1677→          : `Test passed against fixed=${fixedPassed}, failed against buggy=${buggyFailed}.`,
+  1678→        metrics: {
+  1679→          fixedPassed,
+  1680→          buggyFailed,
+  1681→          catchesBug: fixedPassed && buggyFailed,
+  1682→          testLoc: testCode.split('\n').length,
+  1683→        },
+  1684→        summary: isBreakthrough
+  1685→          ? `Breakthrough: Forge synthesized a regression test that catches the described bug. Promotable as a "regression test generator" workflow.`
+  1686→          : `Regression synthesis partial: fixedPassed=${fixedPassed}, buggyFailed=${buggyFailed}.`,
+  1687→      };
+  1688→    },
+  1689→  },
+  1690→
+  1691→  // =========================================================================
+  1692→  // 14. CODE MIGRATION ENGINE — legacy → modern idioms, verified
+  1693→  // =========================================================================
+  1694→  {
+  1695→    slug: 'code-migration-engine',
+  1696→    name: 'Code Migration Engine',
+  1697→    category: 'synthesis',
+  1698→    dangerLevel: 'safe',
+  1699→    hypothesis:
+  1700→      `Forge can migrate legacy Python code to modern idioms (f-strings, type hints) while preserving behavior — verified by identical output on test inputs + static idiom checks.`,
+  1701→    procedure:
+  1702→      '1. Provide legacy-style Python ( %-formatting, no type hints, .format()). 2. Ask AI to migrate to modern Python 3 (f-strings + type hints). 3. Run both on 3 inputs — outputs must match. 4. Static-check the migrated code contains an f-string AND a type hint. 5. Breakthrough if all 3 outputs match AND both static checks pass.',
+  1703→    run: async (ctx) => {
+  1704→      const steps: unknown[] = [];
+  1705→      const log = (s: string, d: unknown) => { steps.push({ step: s, detail: d }); };
+  1706→      const fs2 = await import('node:fs');
+  1707→
+  1708→      const legacyCode = `def greet(name, greeting):
+  1709→    return "%s, %s!" % (greeting, name)
+  1710→
+  1711→def format_price(amount, currency):
+  1712→    return "{:.2f} {}".format(amount, currency)
+  1713→
+  1714→def make_list(items):
+  1715→    result = []
+  1716→    for item in items:
+  1717→        result.append("- " + item)
+  1718→    return "\\n".join(result)
+  1719→`;
+  1720→      fs2.writeFileSync(`${ctx.workDir}/legacy.py`, legacyCode, { mode: 0o755 });
+  1721→      log('legacy-written', { loc: legacyCode.split('\n').length });
+  1722→
+  1723→      const migrateSpec = `Migrate this legacy Python code to modern Python 3 idioms:
+  1724→- Replace all %-formatting with f-strings
+  1725→- Replace all .format() calls with f-strings
+  1726→- Add type hints to ALL function signatures
+  1727→
+  1728→LEGACY CODE:
+  1729→${legacyCode}
+  1730→
+  1731→The migrated code MUST produce IDENTICAL output for any input. Output ONLY the migrated python3 code, no markdown, no explanation.`;
+  1732→      const migrateResponse = await ctx.generate(migrateSpec, 'python');
+  1733→      log('migrated-generated', { desc: migrateResponse.description, loc: migrateResponse.code.split('\n').length });
+  1734→
+  1735→      let migratedCode = migrateResponse.code.replace(/^```[a-z]*\n?/i, '').replace(/\n?```$/i, '').trim();
+  1736→      fs2.writeFileSync(`${ctx.workDir}/modern.py`, migratedCode, { mode: 0o755 });
+  1737→
+  1738→      // Static checks: must contain an f-string and a type hint.
+  1739→      const hasFString = /f"[^"]*\{|f'[^']*\{/.test(migratedCode);
+  1740→      const hasTypeHint = /def\s+\w+\([^)]*:\s*\w+/.test(migratedCode) || /def\s+\w+\([^)]*\)\s*->\s*\w+/.test(migratedCode);
+  1741→      log('static-checks', { hasFString, hasTypeHint });
+  1742→
+  1743→      // Behavioral check: run both on 3 inputs via a driver.
+  1744→      const driver = `#!/usr/bin/env python3
+  1745→import sys
+  1746→sys.path.insert(0, "${ctx.workDir}")
+  1747→import legacy, modern
+  1748→cases = [
+  1749→    ("greet", ("World", "Hello")),
+  1750→    ("format_price", (42.5, "USD")),
+  1751→    ("make_list", (["a", "b", "c"],)),
+  1752→]
+  1753→allok = True
+  1754→for fn, args in cases:
+  1755→    l = getattr(legacy, fn)(*args)
+  1756→    m = getattr(modern, fn)(*args)
+  1757→    match = l == m
+  1758→    if not match:
+  1759→        allok = False
+  1760→    print(f"{fn}: legacy={l!r} modern={m!r} match={match}")
+  1761→print("ALL_MATCH=" + str(allok))
+  1762→`;
+  1763→      fs2.writeFileSync(`${ctx.workDir}/driver.py`, driver, { mode: 0o755 });
+  1764→      const driverRun = await ctx.execute(
+  1765→        { language: 'python', filename: 'driver.py', code: driver, description: 'behavioral diff' },
+  1766→        { timeoutMs: 10_000 },
+  1767→      );
+  1768→      const allMatch = /ALL_MATCH=True/.test(driverRun.stdout);
+  1769→      log('behavioral-check', { allMatch, stdout: driverRun.stdout.trim().slice(0, 300) });
+  1770→
+  1771→      const isBreakthrough = allMatch && hasFString && hasTypeHint;
+  1772→      ctx.log('steps', steps);
+  1773→      return {
+  1774→        verdict: isBreakthrough ? 'BREAKTHROUGH' : (allMatch ? 'NO_CHANGE' : 'REGRESSION'),
+  1775→        verdictReason: isBreakthrough
+  1776→          ? `Migration preserved behavior on all 3 cases AND uses f-strings + type hints.`
+  1777→          : `behaviorMatched=${allMatch}, hasFString=${hasFString}, hasTypeHint=${hasTypeHint}.`,
+  1778→        metrics: {
+  1779→          behaviorMatched: allMatch,
+  1780→          hasFString,
+  1781→          hasTypeHint,
+  1782→          legacyLoc: legacyCode.split('\n').length,
+  1783→          migratedLoc: migratedCode.split('\n').length,
+  1784→        },
+  1785→        summary: isBreakthrough
+  1786→          ? `Breakthrough: Forge migrated legacy code to modern idioms with verified behavior preservation. Promotable as a "code migration" workflow.`
+  1787→          : `Migration partial: behavior=${allMatch}, f-string=${hasFString}, type-hint=${hasTypeHint}.`,
+  1788→      };
+  1789→    },
+  1790→  },
+  1791→
+  1792→  // =========================================================================
+  1793→  // 15. README GENERATOR — source → README with verified working examples
+  1794→  // =========================================================================
+  1795→  {
+  1796→    slug: 'readme-generator',
+  1797→    name: 'README Generator',
+  1798→    category: 'synthesis',
+  1799→    dangerLevel: 'safe',
+  1800→    hypothesis:
+  1801→      `Forge can read a module's source and generate a README whose code examples actually run and produce the documented output — auto-documentation you can trust.`,
+  1802→    procedure:
+  1803→      '1. Write a target module with 3 documented functions. 2. Ask AI for a README with a usage example per function. 3. Extract each fenced code block from the README. 4. Run each block. 5. Breakthrough if all blocks run (exit 0) AND the module is imported correctly.',
+  1804→    run: async (ctx) => {
+  1805→      const steps: unknown[] = [];
+  1806→      const log = (s: string, d: unknown) => { steps.push({ step: s, detail: d }); };
+  1807→      const fs2 = await import('node:fs');
+  1808→
+  1809→      const moduleCode = `#!/usr/bin/env python3
+  1810→"""Math utilities for Forge."""
+  1811→
+  1812→def square(n):
+  1813→    """Return n squared."""
+  1814→    return n * n
+  1815→
+  1816→def is_even(n):
+  1817→    """Return True if n is even."""
+  1818→    return n % 2 == 0
+  1819→
+  1820→def average(numbers):
+  1821→    """Return the average of a list of numbers."""
+  1822→    return sum(numbers) / len(numbers) if numbers else 0
+  1823→`;
+  1824→      fs2.writeFileSync(`${ctx.workDir}/mathutils.py`, moduleCode, { mode: 0o755 });
+  1825→      log('module-written', { loc: moduleCode.split('\n').length });
+  1826→
+  1827→      const readmeSpec = `Generate a README.md for this Python module. Include:
+  1828→- A title and one-line description
+  1829→- A "## Usage" section with a fenced python code block for EACH function showing how to call it and what it returns as a comment.
+  1830→- The code blocks MUST import from mathutils and actually work when run with python3.
+  1831→
+  1832→MODULE SOURCE:
+  1833→${moduleCode}
+  1834→
+  1835→Output ONLY the README.md content (markdown), no extra commentary.`;
+  1836→      const readmeResponse = await ctx.generate(readmeSpec, 'bash');
+  1837→      log('readme-generated', { desc: readmeResponse.description, len: readmeResponse.code.length });
+  1838→
+  1839→      let readme = readmeResponse.code.replace(/^```markdown\n?/i, '').replace(/\n?```$/i, '').trim();
+  1840→      fs2.writeFileSync(`${ctx.workDir}/README.md`, readme);
+  1841→      log('readme-saved', { len: readme.length });
+  1842→
+  1843→      // Extract fenced python code blocks.
+  1844→      const blocks: string[] = [];
+  1845→      const fenceRegex = /```python\n([\s\S]*?)```/g;
+  1846→      let m: RegExpExecArray | null;
+  1847→      while ((m = fenceRegex.exec(readme)) !== null) {
+  1848→        blocks.push(m[1].trim());
+  1849→      }
+  1850→      log('blocks-extracted', { count: blocks.length });
+  1851→
+  1852→      if (blocks.length === 0) {
+  1853→        ctx.log('steps', steps);
+  1854→        return {
+  1855→          verdict: 'REGRESSION',
+  1856→          verdictReason: 'README contained no python code blocks.',
+  1857→          metrics: { blockCount: 0 },
+  1858→          summary: 'No code blocks to verify.',
+  1859→        };
+  1860→      }
+  1861→
+  1862→      // Run each block. Breakthrough if all exit 0.
+  1863→      let passed = 0;
+  1864→      for (let i = 0; i < blocks.length; i++) {
+  1865→        if (Date.now() > ctx.deadline) break;
+  1866→        const block = blocks[i];
+  1867→        const r = await ctx.execute(
+  1868→          { language: 'python', filename: `example_${i}.py`, code: block, description: `README example ${i + 1}` },
+  1869→          { timeoutMs: 6_000 },
+  1870→        );
+  1871→        const ok = r.exitCode === 0;
+  1872→        if (ok) passed++;
+  1873→        log(`block-${i + 1}`, { exit: r.exitCode, ok, stdout: r.stdout.trim().slice(0, 80), stderr: r.stderr.trim().slice(0, 120) });
+  1874→      }
+  1875→
+  1876→      const isBreakthrough = passed === blocks.length && passed >= 2;
+  1877→      ctx.log('steps', steps);
+  1878→      return {
+  1879→        verdict: isBreakthrough ? 'BREAKTHROUGH' : (passed > 0 ? 'NO_CHANGE' : 'REGRESSION'),
+  1880→        verdictReason: isBreakthrough
+  1881→          ? `All ${passed} README code examples run successfully.`
+  1882→          : `${passed}/${blocks.length} examples ran successfully.`,
+  1883→        metrics: {
+  1884→          examplesTotal: blocks.length,
+  1885→          examplesPassed: passed,
+  1886→          readmeLen: readme.length,
+  1887→        },
+  1888→        summary: isBreakthrough
+  1889→          ? `Breakthrough: Forge generated a README with verified-working code examples. Promotable as a "docs generator" workflow.`
+  1890→          : `README generation partial: ${passed}/${blocks.length} examples work.`,
+  1891→      };
+  1892→    },
+  1893→  },
+  1894→
+  1895→  // =========================================================================
+  1896→  // 16. CHANGELOG GENERATOR — git log → semantic-versioned changelog
+  1897→  // =========================================================================
+  1898→  {
+  1899→    slug: 'changelog-generator',
+  1900→    name: 'Changelog Generator',
+  1901→    category: 'synthesis',
+  1902→    dangerLevel: 'safe',
+  1903→    hypothesis:
+  1904→      `Forge can read a git log and generate a Keep-a-Changelog-format CHANGELOG.md that correctly categorizes commits (Added/Changed/Fixed/Removed) by parsing their prefixes.`,
+  1905→    procedure:
+  1906→      '1. Build a fake git log with 8 commits using conventional-commit prefixes. 2. Ask AI to generate a CHANGELOG.md categorizing them. 3. Static-check: contains "### Added", "### Fixed", and commits appear under the right headings. 4. Breakthrough if all 4 categories present AND >=6 of 8 commits correctly placed.',
+  1907→    run: async (ctx) => {
+  1908→      const steps: unknown[] = [];
+  1909→      const log = (s: string, d: unknown) => { steps.push({ step: s, detail: d }); };
+  1910→
+  1911→      const fakeLog = `abc1234 The Octocat 2024-01-15 feat: add user authentication
+  1912→def5678 Jane Doe 2024-01-14 fix: resolve crash on empty input
+  1913→ghi9012 Bob Smith 2024-01-13 feat: add CSV export endpoint
+  1914→jkl3456 Alice 2024-01-12 refactor: simplify database connection pool
+  1915→mno7890 Carol 2024-01-11 fix: handle timezone in date parser
+  1916→pqr1234 Dave 2024-01-10 docs: update API examples
+  1917→stu5678 Eve 2024-01-09 feat: add dark mode toggle
+  1918→vwx9012 Frank 2024-01-08 chore: bump dependencies`;
+  1919→
+  1920→      const changelogSpec = `You are a changelog generator. Given this git log, produce a CHANGELOG.md in Keep-a-Changelog format.
+  1921→
+  1922→GIT LOG (newest first):
+  1923→${fakeLog}
+  1924→
+  1925→Rules:
+  1926→- Group commits under semantic headings: ### Added (for feat:), ### Changed (for refactor:), ### Fixed (for fix:), ### Documentation (for docs:), ### Maintenance (for chore:)
+  1927→- Under each heading, list the commit subject WITHOUT the prefix, as a bullet point.
+  1928→- Omit empty headings.
+  1929→- Start with "# Changelog" then "## [Unreleased]".
+  1930→
+  1931→Output ONLY the CHANGELOG.md content, no explanation.`;
+  1932→      const clResponse = await ctx.generate(changelogSpec, 'bash');
+  1933→      log('changelog-generated', { desc: clResponse.description, len: clResponse.code.length });
+  1934→
+  1935→      let changelog = clResponse.code.replace(/^```markdown\n?/i, '').replace(/\n?```$/i, '').trim();
+  1936→      log('changelog-saved', { len: changelog.length });
+  1937→
+  1938→      const hasAdded = /### Added/.test(changelog);
+  1939→      const hasFixed = /### Fixed/.test(changelog);
+  1940→      const hasChanged = /### Changed/.test(changelog);
+  1941→      const hasUnreleased = /## \[Unreleased\]/.test(changelog);
+  1942→      log('static-checks', { hasAdded, hasFixed, hasChanged, hasUnreleased });
+  1943→
+  1944→      const addedSection = changelog.match(/### Added[\s\S]*?(?=###|#\s|$)/i)?.[0] ?? '';
+  1945→      const fixedSection = changelog.match(/### Fixed[\s\S]*?(?=###|#\s|$)/i)?.[0] ?? '';
+  1946→      const changedSection = changelog.match(/### Changed[\s\S]*?(?=###|#\s|$)/i)?.[0] ?? '';
+  1947→
+  1948→      let correctlyPlaced = 0;
+  1949→      if (/user authentication/i.test(addedSection)) correctlyPlaced++;
+  1950→      if (/CSV export/i.test(addedSection)) correctlyPlaced++;
+  1951→      if (/dark mode/i.test(addedSection)) correctlyPlaced++;
+  1952→      if (/crash on empty input/i.test(fixedSection)) correctlyPlaced++;
+  1953→      if (/timezone/i.test(fixedSection)) correctlyPlaced++;
+  1954→      if (/database connection pool/i.test(changedSection)) correctlyPlaced++;
+  1955→      if (/API examples/i.test(changelog)) correctlyPlaced++;
+  1956→      if (/bump dependencies/i.test(changelog)) correctlyPlaced++;
+  1957→      log('placement-check', { correctlyPlaced, outOf: 8 });
+  1958→
+  1959→      const headingsOk = hasAdded && hasFixed && hasChanged && hasUnreleased;
+  1960→      const isBreakthrough = headingsOk && correctlyPlaced >= 6;
+  1961→      ctx.log('steps', steps);
+  1962→      return {
+  1963→        verdict: isBreakthrough ? 'BREAKTHROUGH' : (correctlyPlaced >= 4 ? 'NO_CHANGE' : 'REGRESSION'),
+  1964→        verdictReason: isBreakthrough
+  1965→          ? `Changelog has all required headings and ${correctlyPlaced}/8 commits correctly categorized.`
+  1966→          : `headingsOk=${headingsOk}, correctlyPlaced=${correctlyPlaced}/8.`,
+  1967→        metrics: {
+  1968→          hasAdded, hasFixed, hasChanged, hasUnreleased,
+  1969→          headingsOk,
+  1970→          commitsCorrectlyPlaced: correctlyPlaced,
+  1971→          commitsTotal: 8,
+  1972→          changelogLen: changelog.length,
+  1973→        },
+  1974→        summary: isBreakthrough
+  1975→          ? `Breakthrough: Forge generated a correctly-categorized changelog from a git log. Promotable as a "release notes generator" workflow.`
+  1976→          : `Changelog partial: ${correctlyPlaced}/8 commits placed correctly.`,
+  1977→      };
+  1978→    },
+  1979→  },
+  1980→
+  1981→  // =========================================================================
+  1982→  // 17. SECURITY HARDENER — vulnerable script → hardened, verified
+  1983→  // =========================================================================
+  1984→  {
+  1985→    slug: 'security-hardener',
+  1986→    name: 'Security Hardener',
+  1987→    category: 'adversarial',
+  1988→    dangerLevel: 'moderate',
+  1989→    hypothesis:
+  1990→      `Forge can take a script with known vulnerabilities (eval) and generate a hardened version that produces identical legitimate output but blocks injection attacks.`,
+  1991→    procedure:
+  1992→      '1. Provide a vulnerable python script (uses eval). 2. Ask AI to harden it. 3. Run both on 3 legitimate inputs — outputs must match. 4. Run hardened on 3 injection inputs — must reject safely. 5. Breakthrough if all 3 legit match AND all 3 injections blocked AND no eval.',
+  1993→    run: async (ctx) => {
+  1994→      const steps: unknown[] = [];
+  1995→      const log = (s: string, d: unknown) => { steps.push({ step: s, detail: d }); };
+  1996→      const fs2 = await import('node:fs');
+  1997→
+  1998→      const vulnerableCode = `#!/usr/bin/env python3
+  1999→import sys
+  2000→# VULNERABLE: uses eval on user input
+
+[showing lines 1-2000 of 5915; use offset=2001 with limit to continue reading]

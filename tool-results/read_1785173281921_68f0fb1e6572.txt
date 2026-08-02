@@ -1,0 +1,1051 @@
+     1→     1→// ============================================================
+     2→     2→// Forge — execution engine
+     3→     3→// ============================================================
+     4→     4→// The core run executor. Responsibilities:
+     5→     5→//   • SSE event bus (subscribe / emit / appendLog)
+     6→     6→//   • Run lifecycle (start / finish / cancel)
+     7→     7→//   • Concurrent-cancellation + queued-run promotion
+     8→     8→//   • Approval gates
+     9→     9→//   • Cache restore / save
+    10→    10→//   • Per-step retry + timeout (via shared runChildStep primitive)
+    11→    11→//   • Matrix fan-out
+    12→    12→//   • Test report capture (via shared storeTestReport)
+    13→    13→//   • Artifact capture
+    14→    14→//   • AxiomState workflow dispatch (parse / bundle)
+    15→    15→//
+    16→    16→// Background timers (log rotation + cron scheduler) are started by
+    17→    17→// `bootstrap.ts` (called from Next.js instrumentation), NOT by
+    18→    18→// importing this module. This keeps the engine test-safe.
+    19→    19→// ============================================================
+    20→    20→import { spawn } from "node:child_process";
+    21→    21→import * as fs from "node:fs";
+    22→    22→import * as path from "node:path";
+    23→    23→import { db } from "@/lib/db";
+    24→    24→import { extractDir, runArtifactDir } from "./storage";
+    25→    25→import { getWorkflow, type WorkflowStep } from "./workflows";
+    26→    26→import type { Detection } from "./detector";
+    27→    27→import type { MatrixRow } from "./types";
+    28→    28→import {
+    29→    29→  buildProcessEnv,
+    30→    30→  getAllSecrets,
+    31→    31→  maskSecrets,
+    32→    32→} from "./secrets";
+    33→    33→import { restoreCache, saveCache, hasCache } from "./cache";
+    34→    34→import {
+    35→    35→  runChildStep,
+    36→    36→  formatBytes,
+    37→    37→  isBlockedCommand,
+    38→    38→} from "./child-runner";
+    39→    39→import { expandMatrix, substituteMatrix } from "./matrix";
+    40→    40→import { ensureBootstrapped } from "./bootstrap";
+    41→    41→
+    42→    42→// Lazy-imported modules (kept lazy to avoid pulling AxiomState /
+    43→    43→// notifications / test-report into the engine's hot path).
+    44→    44→type StoreTestReportFn = typeof import("./test-report")["storeTestReport"];
+    45→    45→let _storeTestReport: StoreTestReportFn | null = null;
+    46→    46→async function storeTestReport(...args: Parameters<StoreTestReportFn>) {
+    47→    47→  if (!_storeTestReport) {
+    48→    48→    _storeTestReport = (await import("./test-report")).storeTestReport;
+    49→    49→  }
+    50→    50→  return _storeTestReport(...args);
+    51→    51→}
+    52→    52→
+    53→    53→export type RunStatus =
+    54→    54→  | "queued"
+    55→    55→  | "running"
+    56→    56→  | "success"
+    57→    57→  | "failed"
+    58→    58→  | "canceled"
+    59→    59→  | "waiting_approval";
+    60→    60→
+    61→    61→export interface RunEvent {
+    62→    62→  type:
+    63→    63→    | "status"
+    64→    64→    | "log"
+    65→    65→    | "artifact"
+    66→    66→    | "done"
+    67→    67→    | "approval-required"
+    68→    68→    | "cache-hit"
+    69→    69→    | "cache-miss"
+    70→    70→    | "cache-saved"
+    71→    71→    | "retry"
+    72→    72→    | "matrix-started"
+    73→    73→    | "matrix-completed";
+    74→    74→  runId: string;
+    75→    75→  status?: RunStatus;
+    76→    76→  log?: {
+    77→    77→    seq: number;
+    78→    78→    stream: "stdout" | "stderr" | "system";
+    79→    79→    text: string;
+    80→    80→    ts: number;
+    81→    81→  };
+    82→    82→  artifact?: { id: string; name: string; size: number };
+    83→    83→  exitCode?: number;
+    84→    84→  durationMs?: number;
+    85→    85→  cacheLabel?: string;
+    86→    86→  retryAttempt?: number;
+    87→    87→  matrixIndex?: number;
+    88→    88→  matrixTotal?: number;
+    89→    89→  message?: string;
+    90→    90→}
+    91→    91→
+    92→    92→type Listener = (event: RunEvent) => void;
+    93→    93→const listeners = new Map<string, Set<Listener>>();
+    94→    94→const active = new Map<
+    95→    95→  string,
+    96→    96→  { child: import("node:child_process").ChildProcess; canceled: boolean }
+    97→    97→>();
+    98→    98→const seqCounter = new Map<string, number>();
+    99→    99→
+   100→   100→export function subscribe(runId: string, fn: Listener): () => void {
+   101→   101→  let set = listeners.get(runId);
+   102→   102→  if (!set) {
+   103→   103→    set = new Set();
+   104→   104→    listeners.set(runId, set);
+   105→   105→  }
+   106→   106→  set.add(fn);
+   107→   107→  return () => {
+   108→   108→    set!.delete(fn);
+   109→   109→    if (set!.size === 0) listeners.delete(runId);
+   110→   110→  };
+   111→   111→}
+   112→   112→
+   113→   113→export function emit(event: RunEvent): void {
+   114→   114→  const set = listeners.get(event.runId);
+   115→   115→  if (set) for (const fn of set) fn(event);
+   116→   116→}
+   117→   117→
+   118→   118→// Maximum log lines per run (prevents unbounded DB growth).
+   119→   119→const MAX_LOG_LINES_PER_RUN = 10_000;
+   120→   120→const logLineCounts = new Map<string, number>();
+   121→   121→const logTruncationWarned = new Set<string>();
+   122→   122→
+   123→   123→export async function appendLog(
+   124→   124→  runId: string,
+   125→   125→  stream: "stdout" | "stderr" | "system",
+   126→   126→  text: string,
+   127→   127→): Promise<void> {
+   128→   128→  const count = logLineCounts.get(runId) ?? 0;
+   129→   129→  // Once the limit is reached, only system messages continue (so the user can
+   130→   130→  // still see errors / status updates), and only one truncation warning is
+   131→   131→  // ever emitted per run.
+   132→   132→  if (count >= MAX_LOG_LINES_PER_RUN && stream !== "system") return;
+   133→   133→
+   134→   134→  // Truncate very long lines (prevents memory issues).
+   135→   135→  const truncated =
+   136→   136→    text.length > 10_000 ? text.slice(0, 10_000) + "…[truncated]" : text;
+   137→   137→
+   138→   138→  const seq = seqCounter.get(runId) ?? 0;
+   139→   139→  seqCounter.set(runId, seq + 1);
+   140→   140→  logLineCounts.set(runId, count + 1);
+   141→   141→  const ts = Date.now();
+   142→   142→  await db.logLine.create({ data: { runId, seq, stream, text: truncated } });
+   143→   143→  emit({ type: "log", runId, log: { seq, stream, text: truncated, ts } });
+   144→   144→
+   145→   145→  if (count === MAX_LOG_LINES_PER_RUN - 1 && !logTruncationWarned.has(runId)) {
+   146→   146→    logTruncationWarned.add(runId);
+   147→   147→    const warnSeq = seq + 1;
+   148→   148→    seqCounter.set(runId, warnSeq + 1);
+   149→   149→    logLineCounts.set(runId, count + 2);
+   150→   150→    const warnText = `⚠ Log limit reached (${MAX_LOG_LINES_PER_RUN} lines). Further stdout/stderr output suppressed.`;
+   151→   151→    await db.logLine.create({
+   152→   152→      data: { runId, seq: warnSeq, stream: "system", text: warnText },
+   153→   153→    });
+   154→   154→    emit({
+   155→   155→      type: "log",
+   156→   156→      runId,
+   157→   157→      log: { seq: warnSeq, stream: "system", text: warnText, ts: Date.now() },
+   158→   158→    });
+   159→   159→  }
+   160→   160→}
+   161→   161→
+   162→   162→// ---------------------------------------------------------------------------
+   163→   163→// Extended run options
+   164→   164→// ---------------------------------------------------------------------------
+   165→   165→
+   166→   166→export interface RunOptions {
+   167→   167→  projectId: string;
+   168→   168→  workflow: string;
+   169→   169→  trigger?: "manual" | "auto" | "webhook" | "cron" | "pipeline";
+   170→   170→  secrets?: string[];
+   171→   171→  env?: Record<string, string>;
+   172→   172→  cache?: {
+   173→   173→    key: string;
+   174→   174→    label: string;
+   175→   175→    paths: string[];
+   176→   176→    restore: boolean;
+   177→   177→    save: boolean;
+   178→   178→  };
+   179→   179→  retry?: number;
+   180→   180→  timeoutMs?: number;
+   181→   181→  matrixValues?: MatrixRow;
+   182→   182→  matrixIndex?: number;
+   183→   183→  matrixTotal?: number;
+   184→   184→  parentRunId?: string;
+   185→   185→  pipelineRunId?: string;
+   186→   186→  concurrencyGroup?: string;
+   187→   187→  stageId?: string;
+   188→   188→  label?: string;
+   189→   189→  testReport?: { format: "junit" | "json" | "tap"; path: string };
+   190→   190→  requiresApproval?: boolean;
+   191→   191→  reRunOfId?: string;
+   192→   192→}
+   193→   193→
+   194→   194→// ---------------------------------------------------------------------------
+   195→   195→// Concurrent cancellation
+   196→   196→// ---------------------------------------------------------------------------
+   197→   197→
+   198→   198→async function cancelInprogressRuns(
+   199→   199→  projectId: string,
+   200→   200→  group?: string | null,
+   201→   201→): Promise<string[]> {
+   202→   202→  const where = group
+   203→   203→    ? { projectId, concurrencyGroup: group, status: "running" as const }
+   204→   204→    : { projectId, status: "running" as const };
+   205→   205→  const inProgress = await db.run.findMany({ where });
+   206→   206→  const canceled: string[] = [];
+   207→   207→  for (const run of inProgress) {
+   208→   208→    const entry = active.get(run.id);
+   209→   209→    if (entry) {
+   210→   210→      entry.canceled = true;
+   211→   211→      try {
+   212→   212→        entry.child.kill("SIGTERM");
+   213→   213→      } catch {
+   214→   214→        /* ignore */
+   215→   215→      }
+   216→   216→    }
+   217→   217→    await appendLog(
+   218→   218→      run.id,
+   219→   219→      "system",
+   220→   220→      group
+   221→   221→        ? `Run canceled: a newer run in group "${group}" was triggered.`
+   222→   222→        : "Run canceled: a newer run was triggered (concurrent cancellation).",
+   223→   223→    );
+   224→   224→    await finishRun(run.id, "canceled", 130);
+   225→   225→    canceled.push(run.id);
+   226→   226→  }
+   227→   227→  return canceled;
+   228→   228→}
+   229→   229→
+   230→   230→// ---------------------------------------------------------------------------
+   231→   231→// Approval gates
+   232→   232→// ---------------------------------------------------------------------------
+   233→   233→
+   234→   234→async function waitForApproval(runId: string): Promise<boolean> {
+   235→   235→  await db.approval.create({
+   236→   236→    data: {
+   237→   237→      runId,
+   238→   238→      status: "pending",
+   239→   239→      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+   240→   240→    },
+   241→   241→  });
+   242→   242→  emit({
+   243→   243→    type: "approval-required",
+   244→   244→    runId,
+   245→   245→    message: "Manual approval required to start this run.",
+   246→   246→  });
+   247→   247→  await appendLog(
+   248→   248→    runId,
+   249→   249→    "system",
+   250→   250→    "⏸ Manual approval required. Waiting for approval...",
+   251→   251→  );
+   252→   252→
+   253→   253→  // Poll for decision (every 2 seconds, up to 24 hours).
+   254→   254→  const deadline = Date.now() + 24 * 60 * 60 * 1000;
+   255→   255→  while (Date.now() < deadline) {
+   256→   256→    await sleep(2000);
+   257→   257→    const approval = await db.approval.findUnique({ where: { runId } });
+   258→   258→    if (!approval) return false;
+   259→   259→    if (approval.status === "approved") {
+   260→   260→      await appendLog(
+   261→   261→        runId,
+   262→   262→        "system",
+   263→   263→        `✓ Approved by ${approval.decidedBy ?? "unknown"}. Starting run...`,
+   264→   264→      );
+   265→   265→      return true;
+   266→   266→    }
+   267→   267→    if (approval.status === "rejected") {
+   268→   268→      await appendLog(
+   269→   269→        runId,
+   270→   270→        "system",
+   271→   271→        `✗ Rejected by ${approval.decidedBy ?? "unknown"}.`,
+   272→   272→      );
+   273→   273→      return false;
+   274→   274→    }
+   275→   275→    if (approval.status === "expired") return false;
+   276→   276→    // Check if run was canceled externally.
+   277→   277→    const run = await db.run.findUnique({ where: { id: runId } });
+   278→   278→    if (run?.status === "canceled") return false;
+   279→   279→  }
+   280→   280→  await db.approval.update({
+   281→   281→    where: { runId },
+   282→   282→    data: { status: "expired" },
+   283→   283→  });
+   284→   284→  await appendLog(runId, "system", "Approval timed out after 24 hours.");
+   285→   285→  return false;
+   286→   286→}
+   287→   287→
+   288→   288→export async function approveRun(
+   289→   289→  runId: string,
+   290→   290→  decidedBy: string,
+   291→   291→  reason?: string,
+   292→   292→): Promise<void> {
+   293→   293→  await db.approval.update({
+   294→   294→    where: { runId },
+   295→   295→    data: { status: "approved", decidedAt: new Date(), decidedBy, reason },
+   296→   296→  });
+   297→   297→}
+   298→   298→
+   299→   299→export async function rejectRun(
+   300→   300→  runId: string,
+   301→   301→  decidedBy: string,
+   302→   302→  reason?: string,
+   303→   303→): Promise<void> {
+   304→   304→  await db.approval.update({
+   305→   305→    where: { runId },
+   306→   306→    data: { status: "rejected", decidedAt: new Date(), decidedBy, reason },
+   307→   307→  });
+   308→   308→}
+   309→   309→
+   310→   310→// ---------------------------------------------------------------------------
+   311→   311→// Public: start an extended run
+   312→   312→// ---------------------------------------------------------------------------
+   313→   313→
+   314→   314→export async function startRunExtended(
+   315→   315→  options: RunOptions,
+   316→   316→): Promise<{ runId: string }> {
+   317→   317→  // Ensure background timers are running (idempotent — see bootstrap.ts).
+   318→   318→  ensureBootstrapped();
+   319→   319→
+   320→   320→  const project = await db.project.findUnique({
+   321→   321→    where: { id: options.projectId },
+   322→   322→  });
+   323→   323→  if (!project) throw new Error(`Project ${options.projectId} not found`);
+   324→   324→  const workflow = getWorkflow(options.workflow);
+   325→   325→  if (!workflow) throw new Error(`Unknown workflow: ${options.workflow}`);
+   326→   326→
+   327→   327→  const detection = JSON.parse(project.detection) as Detection;
+   328→   328→
+   329→   329→  // Concurrency control (skip for pipeline-triggered runs — they're managed
+   330→   330→  // by the pipeline engine which already serializes stages).
+   331→   331→  if (options.trigger !== "pipeline") {
+   332→   332→    const settings = await db.projectSettings.findUnique({
+   333→   333→      where: { projectId: options.projectId },
+   334→   334→    });
+   335→   335→    const group = options.concurrencyGroup ?? settings?.concurrencyGroup ?? null;
+   336→   336→
+   337→   337→    if (group) {
+   338→   338→      const inProgressInGroup = await db.run.findMany({
+   339→   339→        where: {
+   340→   340→          projectId: options.projectId,
+   341→   341→          concurrencyGroup: group,
+   342→   342→          status: { in: ["running", "queued", "waiting_approval"] },
+   343→   343→        },
+   344→   344→      });
+   345→   345→
+   346→   346→      if (inProgressInGroup.length > 0) {
+   347→   347→        if (settings?.cancelInProgress) {
+   348→   348→          // Cancel all in-progress runs in this group.
+   349→   349→          for (const run of inProgressInGroup) {
+   350→   350→            const entry = active.get(run.id);
+   351→   351→            if (entry) {
+   352→   352→              entry.canceled = true;
+   353→   353→              try {
+   354→   354→                entry.child.kill("SIGTERM");
+   355→   355→              } catch {
+   356→   356→                /* ignore */
+   357→   357→              }
+   358→   358→            }
+   359→   359→            await appendLog(
+   360→   360→              run.id,
+   361→   361→              "system",
+   362→   362→              `Run canceled: a newer run in group "${group}" was triggered.`,
+   363→   363→            );
+   364→   364→            await finishRun(run.id, "canceled", 130);
+   365→   365→          }
+   366→   366→          await sleep(100);
+   367→   367→        } else {
+   368→   368→          // Serialized mode: create the run as "queued" and wait in a
+   369→   369→          // background poll loop until all in-progress runs in the group
+   370→   370→          // reach a terminal state, then promote this run to "running".
+   371→   371→          const queuedRun = await db.run.create({
+   372→   372→            data: {
+   373→   373→              projectId: options.projectId,
+   374→   374→              workflow: options.workflow,
+   375→   375→              status: "queued",
+   376→   376→              trigger: options.trigger ?? "manual",
+   377→   377→              startedAt: new Date(),
+   378→   378→              concurrencyGroup: group,
+   379→   379→              timeoutMs: options.timeoutMs ?? null,
+   380→   380→              requiresApproval: options.requiresApproval ?? false,
+   381→   381→              label: options.label ?? null,
+   382→   382→            },
+   383→   383→          });
+   384→   384→          emit({ type: "status", runId: queuedRun.id, status: "queued" });
+   385→   385→
+   386→   386→          void (async () => {
+   387→   387→            const waitDeadline = Date.now() + 24 * 60 * 60 * 1000; // 24h
+   388→   388→            while (Date.now() < waitDeadline) {
+   389→   389→              await sleep(2000);
+   390→   390→              const stillRunning = await db.run.findFirst({
+   391→   391→                where: {
+   392→   392→                  projectId: options.projectId,
+   393→   393→                  concurrencyGroup: group,
+   394→   394→                  status: { in: ["running", "queued", "waiting_approval"] },
+   395→   395→                  id: { not: queuedRun.id },
+   396→   396→                },
+   397→   397→              });
+   398→   398→              if (!stillRunning) break;
+   399→   399→            }
+   400→   400→            await db.run.update({
+   401→   401→              where: { id: queuedRun.id },
+   402→   402→              data: { status: "running" },
+   403→   403→            });
+   404→   404→            emit({ type: "status", runId: queuedRun.id, status: "running" });
+   405→   405→            await appendLog(
+   406→   406→              queuedRun.id,
+   407→   407→              "system",
+   408→   408→              "▶ Run started (was queued in concurrency group).",
+   409→   409→            );
+   410→   410→            await executeRun(queuedRun.id, options, project.extractedPath, detection);
+   411→   411→          })();
+   412→   412→
+   413→   413→          return { runId: queuedRun.id };
+   414→   414→        }
+   415→   415→      }
+   416→   416→    } else if (settings?.concurrentCancellation ?? true) {
+   417→   417→      const canceled = await cancelInprogressRuns(options.projectId);
+   418→   418→      if (canceled.length > 0) await sleep(100);
+   419→   419→    }
+   420→   420→  }
+   421→   421→
+   422→   422→  const run = await db.run.create({
+   423→   423→    data: {
+   424→   424→      projectId: options.projectId,
+   425→   425→      workflow: options.workflow,
+   426→   426→      status: options.requiresApproval ? "waiting_approval" : "running",
+   427→   427→      trigger: options.trigger ?? "manual",
+   428→   428→      startedAt: new Date(),
+   429→   429→      matrixValues: options.matrixValues
+   430→   430→        ? JSON.stringify(options.matrixValues)
+   431→   431→        : null,
+   432→   432→      matrixIndex: options.matrixIndex,
+   433→   433→      matrixTotal: options.matrixTotal,
+   434→   434→      parentRunId: options.parentRunId,
+   435→   435→      pipelineRunId: options.pipelineRunId,
+   436→   436→      stageId: options.stageId,
+   437→   437→      reRunOfId: options.reRunOfId,
+   438→   438→      timeoutMs: options.timeoutMs ?? null,
+   439→   439→      requiresApproval: options.requiresApproval ?? false,
+   440→   440→      label: options.label ?? null,
+   441→   441→      concurrencyGroup: options.concurrencyGroup ?? null,
+   442→   442→    },
+   443→   443→  });
+   444→   444→
+   445→   445→  emit({
+   446→   446→    type: "status",
+   447→   447→    runId: run.id,
+   448→   448→    status: options.requiresApproval ? "waiting_approval" : "running",
+   449→   449→  });
+   450→   450→
+   451→   451→  void (async () => {
+   452→   452→    try {
+   453→   453→      if (options.requiresApproval) {
+   454→   454→        const approved = await waitForApproval(run.id);
+   455→   455→        if (!approved) {
+   456→   456→          await finishRun(run.id, "canceled", 130);
+   457→   457→          return;
+   458→   458→        }
+   459→   459→        await db.run.update({
+   460→   460→          where: { id: run.id },
+   461→   461→          data: { status: "running" },
+   462→   462→        });
+   463→   463→        emit({ type: "status", runId: run.id, status: "running" });
+   464→   464→      }
+   465→   465→      await executeRun(run.id, options, project.extractedPath, detection);
+   466→   466→    } catch (err) {
+   467→   467→      await appendLog(
+   468→   468→        run.id,
+   469→   469→        "system",
+   470→   470→        `Runner crashed: ${err instanceof Error ? err.message : String(err)}`,
+   471→   471→      );
+   472→   472→      await finishRun(run.id, "failed", -1);
+   473→   473→    }
+   474→   474→  })();
+   475→   475→
+   476→   476→  return { runId: run.id };
+   477→   477→}
+   478→   478→
+   479→   479→/** Backward-compatible wrapper. */
+   480→   480→export async function startRun(args: {
+   481→   481→  projectId: string;
+   482→   482→  workflow: string;
+   483→   483→  trigger?: "manual" | "auto";
+   484→   484→}): Promise<{ runId: string }> {
+   485→   485→  return startRunExtended({
+   486→   486→    projectId: args.projectId,
+   487→   487→    workflow: args.workflow,
+   488→   488→    trigger: args.trigger ?? "manual",
+   489→   489→  });
+   490→   490→}
+   491→   491→
+   492→   492→/**
+   493→   493→ * Execute a run's workflow. Used both for the primary path and for
+   494→   494→ * queued-run promotion (after the concurrency group is free).
+   495→   495→ */
+   496→   496→async function executeRun(
+   497→   497→  runId: string,
+   498→   498→  options: RunOptions,
+   499→   499→  projectRoot: string,
+   500→   500→  detection: Detection,
+   501→   501→): Promise<void> {
+   502→   502→  const workflow = getWorkflow(options.workflow);
+   503→   503→  if (!workflow) throw new Error(`Unknown workflow: ${options.workflow}`);
+   504→   504→
+   505→   505→  const steps = workflow.build(detection);
+   506→   506→  if (!steps || steps.length === 0) {
+   507→   507→    await appendLog(
+   508→   508→      runId,
+   509→   509→      "system",
+   510→   510→      `Workflow ${options.workflow} has no steps for this project.`,
+   511→   511→    );
+   512→   512→    await finishRun(runId, "failed", 1);
+   513→   513→    return;
+   514→   514→  }
+   515→   515→
+   516→   516→  // Substitute matrix values in step commands.
+   517→   517→  const substitutedSteps = options.matrixValues
+   518→   518→    ? steps.map((s) => ({
+   519→   519→        ...s,
+   520→   520→        command: substituteMatrix(s.command, options.matrixValues!),
+   521→   521→        label: substituteMatrix(s.label, options.matrixValues!),
+   522→   522→      }))
+   523→   523→    : steps;
+   524→   524→
+   525→   525→  // Build env with secrets + matrix values.
+   526→   526→  const secretsList = options.secrets ?? [];
+   527→   527→  const extraEnv: Record<string, string> = { ...options.env };
+   528→   528→  if (options.matrixValues) {
+   529→   529→    for (const [k, v] of Object.entries(options.matrixValues)) {
+   530→   530→      extraEnv[`MATRIX_${k.toUpperCase()}`] = v;
+   531→   531→    }
+   532→   532→  }
+   533→   533→  const allSecrets =
+   534→   534→    secretsList.length > 0 ? await getAllSecrets(options.projectId) : {};
+   535→   535→
+   536→   536→  // Cache restore.
+   537→   537→  if (options.cache?.restore) {
+   538→   538→    const cacheExists = await hasCache(options.projectId, options.cache.key);
+   539→   539→    if (cacheExists) {
+   540→   540→      const restored = await restoreCache(options.projectId, options.cache.key);
+   541→   541→      if (restored.hit) {
+   542→   542→        emit({ type: "cache-hit", runId, cacheLabel: options.cache.label });
+   543→   543→        await appendLog(
+   544→   544→          runId,
+   545→   545→          "system",
+   546→   546→          `💾 Cache hit: ${options.cache.label} (${formatBytes(restored.size ?? 0)})`,
+   547→   547→        );
+   548→   548→      }
+   549→   549→    } else {
+   550→   550→      emit({ type: "cache-miss", runId, cacheLabel: options.cache.label });
+   551→   551→      await appendLog(
+   552→   552→        runId,
+   553→   553→        "system",
+   554→   554→        `💾 Cache miss: ${options.cache.label}`,
+   555→   555→      );
+   556→   556→    }
+   557→   557→  }
+   558→   558→
+   559→   559→  const startedAt = Date.now();
+   560→   560→  let lastExitCode = 0;
+   561→   561→
+   562→   562→  // AxiomState workflows (parse / bundle) bypass the shell-step loop.
+   563→   563→  if (options.workflow === "parse" || options.workflow === "bundle") {
+   564→   564→    lastExitCode = await runAxiomWorkflow(
+   565→   565→      runId,
+   566→   566→      projectRoot,
+   567→   567→      options.workflow,
+   568→   568→      options.matrixValues,
+   569→   569→    );
+   570→   570→  } else {
+   571→   571→    for (const step of substitutedSteps) {
+   572→   572→      if (active.get(runId)?.canceled) {
+   573→   573→        await finishRun(runId, "canceled", 130, Date.now() - startedAt);
+   574→   574→        return;
+   575→   575→      }
+   576→   576→      const maxAttempts = (options.retry ?? 0) + 1;
+   577→   577→      let attempt = 0;
+   578→   578→      let stepExitCode = 1;
+   579→   579→      while (attempt < maxAttempts) {
+   580→   580→        if (attempt > 0) {
+   581→   581→          emit({ type: "retry", runId, retryAttempt: attempt });
+   582→   582→          await appendLog(
+   583→   583→            runId,
+   584→   584→            "system",
+   585→   585→            `↻ Retry ${attempt}/${maxAttempts - 1} for: ${step.label}`,
+   586→   586→          );
+   587→   587→        }
+   588→   588→        await appendLog(runId, "system", `▶ ${step.label}`);
+   589→   589→        stepExitCode = await runStep(runId, step, projectRoot, {
+   590→   590→          secrets: allSecrets,
+   591→   591→          extraEnv,
+   592→   592→          timeoutMs: options.timeoutMs,
+   593→   593→        });
+   594→   594→        if (stepExitCode === 0) break;
+   595→   595→        attempt++;
+   596→   596→      }
+   597→   597→      if (stepExitCode !== 0) {
+   598→   598→        lastExitCode = stepExitCode;
+   599→   599→        await appendLog(
+   600→   600→          runId,
+   601→   601→          "system",
+   602→   602→          `✗ Step failed with exit code ${stepExitCode} after ${attempt} attempt(s).`,
+   603→   603→        );
+   604→   604→        await finishRun(runId, "failed", stepExitCode, Date.now() - startedAt);
+   605→   605→        // Cache save even on failure (partial cache is still useful).
+   606→   606→        if (options.cache?.save) {
+   607→   607→          try {
+   608→   608→            await saveCache(
+   609→   609→              options.projectId,
+   610→   610→              options.cache.key,
+   611→   611→              options.cache.label,
+   612→   612→              options.cache.paths,
+   613→   613→            );
+   614→   614→            emit({ type: "cache-saved", runId, cacheLabel: options.cache.label });
+   615→   615→            await appendLog(
+   616→   616→              runId,
+   617→   617→              "system",
+   618→   618→              `💾 Cache saved: ${options.cache.label}`,
+   619→   619→            );
+   620→   620→          } catch (err) {
+   621→   621→            await appendLog(
+   622→   622→              runId,
+   623→   623→              "system",
+   624→   624→              `Cache save failed: ${err instanceof Error ? err.message : String(err)}`,
+   625→   625→            );
+   626→   626→          }
+   627→   627→        }
+   628→   628→        return;
+   629→   629→      }
+   630→   630→      await appendLog(runId, "system", `✓ ${step.label}`);
+   631→   631→    }
+   632→   632→  }
+   633→   633→
+   634→   634→  // Test report capture (single source of truth: test-report.storeTestReport).
+   635→   635→  if (options.testReport) {
+   636→   636→    try {
+   637→   637→      const reportPath = path.join(projectRoot, options.testReport.path);
+   638→   638→      if (fs.existsSync(reportPath)) {
+   639→   639→        const content = fs.readFileSync(reportPath, "utf-8");
+   640→   640→        const { parseJUnit, parseJSONReport, parseTAP } = await import(
+   641→   641→          "./test-report"
+   642→   642→        );
+   643→   643→        const report =
+   644→   644→          options.testReport.format === "junit"
+   645→   645→            ? parseJUnit(content)
+   646→   646→            : options.testReport.format === "json"
+   647→   647→              ? parseJSONReport(content)
+   648→   648→              : parseTAP(content);
+   649→   649→        await storeTestReport(runId, report);
+   650→   650→        await appendLog(
+   651→   651→          runId,
+   652→   652→          "system",
+   653→   653→          `📊 Test report: ${report.passed} passed, ${report.failed} failed, ${report.skipped} skipped (${report.total} total).`,
+   654→   654→        );
+   655→   655→      }
+   656→   656→    } catch (err) {
+   657→   657→      await appendLog(
+   658→   658→        runId,
+   659→   659→        "system",
+   660→   660→        `Test report parsing failed: ${err instanceof Error ? err.message : String(err)}`,
+   661→   661→      );
+   662→   662→    }
+   663→   663→  }
+   664→   664→
+   665→   665→  // Capture artifacts.
+   666→   666→  await captureArtifacts(runId, options.workflow, detection, projectRoot);
+   667→   667→
+   668→   668→  // Cache save on success.
+   669→   669→  if (options.cache?.save) {
+   670→   670→    try {
+   671→   671→      const { size } = await saveCache(
+   672→   672→        options.projectId,
+   673→   673→        options.cache.key,
+   674→   674→        options.cache.label,
+   675→   675→        options.cache.paths,
+   676→   676→      );
+   677→   677→      emit({ type: "cache-saved", runId, cacheLabel: options.cache.label });
+   678→   678→      await appendLog(
+   679→   679→        runId,
+   680→   680→        "system",
+   681→   681→        `💾 Cache saved: ${options.cache.label} (${formatBytes(size)})`,
+   682→   682→      );
+   683→   683→    } catch (err) {
+   684→   684→      await appendLog(
+   685→   685→        runId,
+   686→   686→        "system",
+   687→   687→        `Cache save failed: ${err instanceof Error ? err.message : String(err)}`,
+   688→   688→      );
+   689→   689→    }
+   690→   690→  }
+   691→   691→
+   692→   692→  await finishRun(runId, "success", lastExitCode, Date.now() - startedAt);
+   693→   693→}
+   694→   694→
+   695→   695→export async function cancelRun(runId: string): Promise<void> {
+   696→   696→  const entry = active.get(runId);
+   697→   697→  if (entry) {
+   698→   698→    entry.canceled = true;
+   699→   699→    try {
+   700→   700→      entry.child.kill("SIGTERM");
+   701→   701→    } catch {
+   702→   702→      /* ignore */
+   703→   703→    }
+   704→   704→  }
+   705→   705→  await appendLog(runId, "system", "Run canceled by user");
+   706→   706→  await finishRun(runId, "canceled", 130);
+   707→   707→}
+   708→   708→
+   709→   709→// ---------------------------------------------------------------------------
+   710→   710→// Step execution — delegates to the shared runChildStep primitive.
+   711→   711→// ---------------------------------------------------------------------------
+   712→   712→
+   713→   713→interface StepEnvOptions {
+   714→   714→  secrets: Record<string, string>;
+   715→   715→  extraEnv: Record<string, string>;
+   716→   716→  timeoutMs?: number;
+   717→   717→}
+   718→   718→
+   719→   719→async function runStep(
+   720→   720→  runId: string,
+   721→   721→  step: WorkflowStep,
+   722→   722→  cwd: string,
+   723→   723→  envOptions: StepEnvOptions,
+   724→   724→): Promise<number> {
+   725→   725→  if (isBlockedCommand(step.command)) {
+   726→   726→    await appendLog(
+   727→   727→      runId,
+   728→   728→      "system",
+   729→   729→      `🚫 Command blocked by security policy: ${step.command.slice(0, 80)}`,
+   730→   730→    );
+   731→   731→    return 126;
+   732→   732→  }
+   733→   733→
+   734→   734→  const baseEnv = await buildProcessEnv("", {
+   735→   735→    extraEnv: envOptions.extraEnv,
+   736→   736→    projectRoot: cwd,
+   737→   737→  });
+   738→   738→  const fullEnv = { ...baseEnv, ...envOptions.secrets };
+   739→   739→  const cancelSignal = { aborted: false };
+   740→   740→
+   741→   741→  // Track active child for cancellation / concurrent-cancellation.
+   742→   742→  // We pretend the child exists by creating a placeholder that cancelRun
+   743→   743→  // can mark canceled; runChildStep reads `cancelSignal.aborted`.
+   744→   744→  const fakeChild = new (class {
+   745→   745→    kill(_signal?: string) {
+   746→   746→      cancelSignal.aborted = true;
+   747→   747→    }
+   748→   748→  })() as unknown as import("node:child_process").ChildProcess;
+   749→   749→  active.set(runId, { child: fakeChild, canceled: false });
+   750→   750→
+   751→   751→  const result = await runChildStep({
+   752→   752→    cwd,
+   753→   753→    command: step.command,
+   754→   754→    language: "bash",
+   755→   755→    env: fullEnv,
+   756→   756→    secrets: envOptions.secrets,
+   757→   757→    timeoutMs: envOptions.timeoutMs ?? null,
+   758→   758→    signal: cancelSignal,
+   759→   759→    onLine: (stream, text) => {
+   760→   760→      void appendLog(runId, stream, text);
+   761→   761→    },
+   762→   762→  });
+   763→   763→
+   764→   764→  active.delete(runId);
+   765→   765→
+   766→   766→  if (result.timedOut) {
+   767→   767→    await appendLog(
+   768→   768→      runId,
+   769→   769→      "system",
+   770→   770→      `⏱ Step timed out after ${envOptions.timeoutMs}ms.`,
+   771→   771→    );
+   772→   772→  }
+   773→   773→  return result.exitCode;
+   774→   774→}
+   775→   775→
+   776→   776→// ---------------------------------------------------------------------------
+   777→   777→// AxiomState workflow (parse / bundle)
+   778→   778→// ---------------------------------------------------------------------------
+   779→   779→
+   780→   780→async function runAxiomWorkflow(
+   781→   781→  runId: string,
+   782→   782→  projectRoot: string,
+   783→   783→  key: "parse" | "bundle",
+   784→   784→  matrixValues?: MatrixRow,
+   785→   785→): Promise<number> {
+   786→   786→  try {
+   787→   787→    const { parseProject, writeGraph, sliceForward } = await import(
+   788→   788→      "@/lib/axiomstate/phase1"
+   789→   789→    );
+   790→   790→    const { bundleFiles } = await import("@/lib/axiomstate/phase2");
+   791→   791→    const { LSSKernel } = await import("@/lib/axiomstate/phase0/kernel");
+   792→   792→
+   793→   793→    // Place the kernel under the project's own storage directory (not under
+   794→   794→    // an unrelated project's path — fixes the original extractDir('') bug).
+   795→   795→    const kernelDir = path.join(
+   796→   796→      path.dirname(extractDir("__axiomstate__")),
+   797→   797→      `kernel-${runId}`,
+   798→   798→    );
+   799→   799→    fs.mkdirSync(kernelDir, { recursive: true });
+   800→   800→    const kernel = new LSSKernel(kernelDir);
+   801→   801→
+   802→   802→    await appendLog(
+   803→   803→      runId,
+   804→   804→      "system",
+   805→   805→      `AxiomState: parsing project at ${projectRoot}`,
+   806→   806→    );
+   807→   807→    const delta = parseProject(projectRoot);
+   808→   808→    const seq = writeGraph(kernel, delta, {
+   809→   809→      checkpoint: false,
+   810→   810→      providerName: "typescript+regex",
+   811→   811→    });
+   812→   812→    await appendLog(
+   813→   813→      runId,
+   814→   814→      "stdout",
+   815→   815→      `Parsed ${delta.nodes.length} nodes and ${delta.edges.length} edges (seq=${seq}).`,
+   816→   816→    );
+   817→   817→    if (matrixValues) {
+   818→   818→      await appendLog(runId, "system", `Matrix: ${JSON.stringify(matrixValues)}`);
+   819→   819→    }
+   820→   820→
+   821→   821→    if (key === "parse") {
+   822→   822→      for (const node of delta.nodes) {
+   823→   823→        await appendLog(
+   824→   824→          runId,
+   825→   825→          "stdout",
+   826→   826→          `  ${node.kind.padEnd(6)} ${node.id}  (deps: ${node.deps.length})`,
+   827→   827→        );
+   828→   828→      }
+   829→   829→    } else {
+   830→   830→      const indexNode = delta.nodes.find(
+   831→   831→        (n) => n.kind === "file" && /index\.(ts|js|tsx|jsx)$/.test(n.name),
+   832→   832→      );
+   833→   833→      if (!indexNode) {
+   834→   834→        await appendLog(
+   835→   835→          runId,
+   836→   836→          "stderr",
+   837→   837→          "No index.(ts|js|tsx|jsx) entry found — cannot bundle.",
+   838→   838→        );
+   839→   839→        return 1;
+   840→   840→      }
+   841→   841→      await appendLog(
+   842→   842→        runId,
+   843→   843→        "system",
+   844→   844→        `AxiomState: bundling forward slice from ${indexNode.id}`,
+   845→   845→      );
+   846→   846→      const slice = sliceForward(kernel, indexNode.id);
+   847→   847→      const fileIds = Array.from(slice.nodes.values())
+   848→   848→        .filter((n) => n.kind === "file")
+   849→   849→        .map((n) => n.id);
+   850→   850→      const bundle = bundleFiles(kernel, fileIds);
+   851→   851→      await appendLog(
+   852→   852→        runId,
+   853→   853→        "stdout",
+   854→   854→        `Bundle order (${bundle.order.length} files):`,
+   855→   855→      );
+   856→   856→      for (const id of bundle.order) await appendLog(runId, "stdout", `  • ${id}`);
+   857→   857→      if (bundle.cycles.length > 0) {
+   858→   858→        await appendLog(
+   859→   859→          runId,
+   860→   860→          "stderr",
+   861→   861→          `Cycles detected: ${bundle.cycles.length}`,
+   862→   862→        );
+   863→   863→        for (const cycle of bundle.cycles)
+   864→   864→          await appendLog(runId, "stderr", `  ↻ ${cycle.join(" → ")}`);
+   865→   865→      }
+   866→   866→      const artifactDir = runArtifactDir(runId);
+   867→   867→      const outPath = path.join(artifactDir, "bundle.js");
+   868→   868→      const parts: Buffer[] = [];
+   869→   869→      for (const entry of bundle.entries) {
+   870→   870→        parts.push(Buffer.from(`\n// --- ${entry.path} ---\n`));
+   871→   871→        parts.push(Buffer.from(entry.content));
+   872→   872→      }
+   873→   873→      fs.writeFileSync(outPath, Buffer.concat(parts));
+   874→   874→      const stat = fs.statSync(outPath);
+   875→   875→      const artifact = await db.artifact.create({
+   876→   876→        data: {
+   877→   877→          runId,
+   878→   878→          name: "bundle.js",
+   879→   879→          path: outPath,
+   880→   880→          size: stat.size,
+   881→   881→          mime: "text/javascript",
+   882→   882→        },
+   883→   883→      });
+   884→   884→      emit({
+   885→   885→        type: "artifact",
+   886→   886→        runId,
+   887→   887→        artifact: { id: artifact.id, name: artifact.name, size: artifact.size },
+   888→   888→      });
+   889→   889→      await appendLog(
+   890→   890→        runId,
+   891→   891→        "system",
+   892→   892→        `Artifact written: bundle.js (${stat.size} bytes)`,
+   893→   893→      );
+   894→   894→    }
+   895→   895→
+   896→   896→    kernel.close();
+   897→   897→    try {
+   898→   898→      fs.rmSync(kernelDir, { recursive: true, force: true });
+   899→   899→    } catch {
+   900→   900→      /* ignore */
+   901→   901→    }
+   902→   902→    return 0;
+   903→   903→  } catch (err) {
+   904→   904→    await appendLog(
+   905→   905→      runId,
+   906→   906→      "stderr",
+   907→   907→      `AxiomState error: ${err instanceof Error ? err.message : String(err)}`,
+   908→   908→    );
+   909→   909→    return 1;
+   910→   910→  }
+   911→   911→}
+   912→   912→
+   913→   913→// ---------------------------------------------------------------------------
+   914→   914→// Artifacts
+   915→   915→// ---------------------------------------------------------------------------
+   916→   916→
+   917→   917→async function captureArtifacts(
+   918→   918→  runId: string,
+   919→   919→  workflowKey: string,
+   920→   920→  detection: Detection,
+   921→   921→  projectRoot: string,
+   922→   922→): Promise<void> {
+   923→   923→  const workflow = getWorkflow(workflowKey);
+   924→   924→  if (!workflow?.producesArtifacts) return;
+   925→   925→  const specs = workflow.producesArtifacts(detection, projectRoot);
+   926→   926→  if (specs.length === 0) return;
+   927→   927→
+   928→   928→  const artifactDir = runArtifactDir(runId);
+   929→   929→  for (const spec of specs) {
+   930→   930→    // Case 1: directory glob like "dist/**/*" — zip the whole directory.
+   931→   931→    const dirMatch = spec.glob.match(/^(.+?)\/\*\*\/\*$/);
+   932→   932→    if (dirMatch) {
+   933→   933→      const dir = dirMatch[1]!;
+   934→   934→      const fullDir = path.join(projectRoot, dir);
+   935→   935→      if (!fs.existsSync(fullDir)) continue;
+   936→   936→      const zipPath = path.join(artifactDir, `${spec.name}.zip`);
+   937→   937→      await zipDirectory(fullDir, zipPath);
+   938→   938→      const stat = fs.statSync(zipPath);
+   939→   939→      const artifact = await db.artifact.create({
+   940→   940→        data: {
+   941→   941→          runId,
+   942→   942→          name: `${spec.name}.zip`,
+   943→   943→          path: zipPath,
+   944→   944→          size: stat.size,
+   945→   945→          mime: "application/zip",
+   946→   946→        },
+   947→   947→      });
+   948→   948→      emit({
+   949→   949→        type: "artifact",
+   950→   950→        runId,
+   951→   951→        artifact: { id: artifact.id, name: artifact.name, size: artifact.size },
+   952→   952→      });
+   953→   953→      await appendLog(
+   954→   954→        runId,
+   955→   955→        "system",
+   956→   956→        `Artifact captured: ${artifact.name} (${stat.size} bytes)`,
+   957→   957→      );
+   958→   958→      continue;
+   959→   959→    }
+   960→   960→
+   961→   961→    // Case 2: single file like "forge-apk-output/app-release.apk" — copy as-is.
+   962→   962→    const fullPath = path.join(projectRoot, spec.glob);
+   963→   963→    if (!fs.existsSync(fullPath)) {
+   964→   964→      await appendLog(
+   965→   965→        runId,
+   966→   966→        "system",
+   967→   967→        `Artifact not found at expected path: ${spec.glob}`,
+   968→   968→      );
+   969→   969→      continue;
+   970→   970→    }
+   971→   971→    const stat = fs.statSync(fullPath);
+   972→   972→    if (stat.isDirectory()) continue;
+   973→   973→    const destName = spec.name || path.basename(fullPath);
+   974→   974→    const destPath = path.join(artifactDir, destName);
+   975→   975→    fs.copyFileSync(fullPath, destPath);
+   976→   976→    const artifact = await db.artifact.create({
+   977→   977→      data: {
+   978→   978→        runId,
+   979→   979→        name: destName,
+   980→   980→        path: destPath,
+   981→   981→        size: stat.size,
+   982→   982→        mime: spec.mime,
+   983→   983→      },
+   984→   984→    });
+   985→   985→    emit({
+   986→   986→      type: "artifact",
+   987→   987→      runId,
+   988→   988→      artifact: { id: artifact.id, name: artifact.name, size: artifact.size },
+   989→   989→    });
+   990→   990→    await appendLog(
+   991→   991→      runId,
+   992→   992→      "system",
+   993→   993→      `Artifact captured: ${artifact.name} (${stat.size} bytes)`,
+   994→   994→    );
+   995→   995→  }
+   996→   996→}
+   997→   997→
+   998→   998→async function zipDirectory(
+   999→   999→  srcDir: string,
+  1000→  1000→  outPath: string,
+  1001→  1001→): Promise<void> {
+  1002→  1002→  return new Promise((resolve, reject) => {
+  1003→  1003→    const child = spawn("zip", ["-r", "-q", outPath, "."], { cwd: srcDir });
+  1004→  1004→    child.on("close", (code) =>
+  1005→  1005→      code === 0 ? resolve() : reject(new Error(`zip exited with ${code}`)),
+  1006→  1006→    );
+  1007→  1007→    child.on("error", reject);
+  1008→  1008→  });
+  1009→  1009→}
+  1010→  1010→
+  1011→  1011→// ---------------------------------------------------------------------------
+  1012→  1012→// Helpers
+  1013→  1013→// ---------------------------------------------------------------------------
+  1014→  1014→
+  1015→  1015→export async function finishRun(
+  1016→  1016→  runId: string,
+  1017→  1017→  status: RunStatus,
+  1018→  1018→  exitCode: number,
+  1019→  1019→  durationMs?: number,
+  1020→  1020→): Promise<void> {
+  1021→  1021→  seqCounter.delete(runId);
+  1022→  1022→  logLineCounts.delete(runId);
+  1023→  1023→  logTruncationWarned.delete(runId);
+  1024→  1024→  await db.run.update({
+  1025→  1025→    where: { id: runId },
+  1026→  1026→    data: {
+  1027→  1027→      status,
+  1028→  1028→      exitCode,
+  1029→  1029→      finishedAt: new Date(),
+  1030→  1030→      durationMs: durationMs ?? 0,
+  1031→  1031→    },
+  1032→  1032→  });
+  1033→  1033→  emit({ type: "done", runId, status, exitCode, durationMs });
+  1034→  1034→
+  1035→  1035→  // Fire notifications (lazy import to avoid circular deps).
+  1036→  1036→  try {
+  1037→  1037→    const { notifyRunEvent } = await import("./notifications");
+  1038→  1038→    await notifyRunEvent(runId, status);
+  1039→  1039→  } catch {
+  1040→  1040→    /* notifications not ready yet */
+  1041→  1041→  }
+  1042→  1042→}
+  1043→  1043→
+  1044→  1044→function sleep(ms: number): Promise<void> {
+  1045→  1045→  return new Promise((resolve) => setTimeout(resolve, ms));
+  1046→  1046→}
+  1047→  1047→
+  1048→  1048→// Re-export shared utilities so existing callers can keep importing
+  1049→  1049→// `expandMatrix` from "./engine" during the transition.
+  1050→  1050→export { expandMatrix };
+  1051→  1051→
