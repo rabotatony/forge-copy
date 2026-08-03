@@ -708,6 +708,30 @@ const universalWorkflows: Workflow[] = [
       { name: 'dist', glob: 'dist/**/*', mime: 'application/octet-stream' },
     ],
   },
+  {
+    key: 'static-export',
+    name: 'Static export build',
+    description: 'Build a static site (Next.js export via BUILD_APK=1 / Vite / plain) into out or dist, ready for Forge static deploys.',
+    icon: 'PackageOpen',
+    kinds: ['node'],
+    build: (d) => {
+      if (d.type !== 'node' || !d.scripts?.build) return null;
+      return [
+        {
+          label: 'Build static output',
+          command: 'if [ -f next.config.ts ] || [ -f next.config.js ] || [ -f next.config.mjs ] || [ -f next.config.cjs ]; then BUILD_APK=1 npm run build; else npm run build; fi',
+        },
+        {
+          label: 'Verify output',
+          command: 'test -d out || test -d dist || test -d build || (echo "no static output dir found (out/dist/build)" && exit 1)',
+        },
+      ];
+    },
+    producesArtifacts: () => [
+      { name: 'static-site (out)', glob: 'out/**/*', mime: 'application/octet-stream' },
+      { name: 'static-site (dist)', glob: 'dist/**/*', mime: 'application/octet-stream' },
+    ],
+  },
 ];
 
 export const ALL_WORKFLOWS: Workflow[] = [
