@@ -195,6 +195,15 @@ function getSetting(key: string): string | null {
 }
 
 /**
+ * Return the global GitHub token (Forge settings store or env), without
+ * requiring a project / owner / repo. Used for account-level operations
+ * such as listing repos for linking (see /api/forge/github/repos).
+ */
+export function getGlobalGitHubToken(): string | null {
+  return getSetting("GITHUB_TOKEN");
+}
+
+/**
  * Validate a git branch/ref name against GitHub's rules.
  * Rejects: empty, >255 chars, leading '-', '..', '~', ':', '?', '*',
  * '[', '\', spaces, control chars. Returns an error message or null.
