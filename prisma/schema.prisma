@@ -50,6 +50,7 @@ model Project {
   settings      ProjectSettings?
   environments  Environment[]
   apiTokens     ApiToken[]
+  artifacts     Artifact[]
 
   @@index([createdAt])
 }
@@ -111,15 +112,23 @@ model LogLine {
 
 model Artifact {
   id        String   @id @default(cuid())
-  runId     String
-  run       Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
+  projectId String?
+  project   Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  runId     String?
+  run       Run?     @relation(fields: [runId], references: [id], onDelete: Cascade)
   name      String
   path      String
   size      Int
   mime      String
+  kind      String   @default("file") // file|zip|apk|binary|archive
+  version   String?
+  sha256    String?
+  source    String   @default("run") // run|workflow|url|upload
+  meta      String   @default("{}") // JSON: provenance notes
   createdAt DateTime @default(now())
 
   @@index([runId])
+  @@index([projectId])
 }
 
 // ============================================================

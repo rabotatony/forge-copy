@@ -31,6 +31,7 @@ const InsightsPanel = lazy(() => import("./insights-panel").then(m => ({ default
 const OnboardingPanel = lazy(() => import("./onboarding-panel").then(m => ({ default: m.OnboardingPanel })));
 const CapabilityCard = lazy(() => import("./capability-card").then(m => ({ default: m.CapabilityCard })));
 const BuildIntelligencePanel = lazy(() => import("./BuildIntelligencePanel").then(m => ({ default: m.BuildIntelligencePanel })));
+const ArtifactsPanel = lazy(() => import("./ArtifactsPanel").then(m => ({ default: m.ArtifactsPanel })));
 const DeploymentsPanel = lazy(() => import("./DeploymentsPanel").then(m => ({ default: m.DeploymentsPanel })));
 const ActivityTimeline = lazy(() => import("./activity-timeline").then(m => ({ default: m.ActivityTimeline })));
 const RunComparison = lazy(() => import("./run-comparison").then(m => ({ default: m.RunComparison })));
@@ -203,6 +204,7 @@ export function ProjectWorkspace({
 
             {/* Build Intelligence — capabilities + one-click config generation */}
             <BuildIntelligencePanel projectId={projectId} />
+            <ArtifactsPanel projectId={projectId} />
 
             {/* Insights — profile-aware recommendations */}
             <InsightsPanel projectId={projectId} onRunStarted={onOpenRun} />
