@@ -456,3 +456,46 @@ model ExperimentRun {
   @@index([verdict])
 }
 
+// ============================================================
+// Forge Mesh — distributed node registry
+// ============================================================
+// A Node is any machine (community VPS, old laptop, Android/Termux
+// phone, free-tier container) running the Forge agent. Nodes connect
+// OUTBOUND to this control plane — no inbound ports needed, so they
+// work behind NAT, CGNAT and even mobile data.
+//
+// Nodes are assembled into a private cloud: Forge places deployments
+// across them and fails over when one disappears. Secrets are stored
+// hashed; the plaintext is shown exactly once at registration.
+model Node {
+  id           String    @id @default(cuid())
+  name         String
+  slug         String    @unique
+  kind         String    @default("generic") // generic|vps|termux|koyeb|render|cloudflare|home
+  endpoint     String?   // optional inbound url (usually empty — outbound-only)
+  secretHash   String    // sha256 of the node secret (plaintext shown once)
+  status       String    @default("offline") // last agent-reported state
+  capabilities String    @default("[]") // JSON array: static|node|docker|tunnel
+  labels       String    @default("{}") // JSON: provider/region/ram notes
+  version      String?   // agent version
+  lastSeenAt   DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([status])
+}
+
+// A unit of work dispatched to a node through the outbound channel.
+model NodeTask {
+  id        String   @id @default(cuid())
+  nodeId    String
+  kind      String   // deploy_static|deploy_node|run_command
+  payload   String   // JSON
+  status    String   @default("pending") // pending|running|done|failed
+  result    String?
+  error     String?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([nodeId, status])
+}
