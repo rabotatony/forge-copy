@@ -1,0 +1,3 @@
+# Placeholder so the Caddyfile glob import always matches at least one file.
+# The Forge deploy engine writes one <slug>.caddy snippet per deployed site
+# into this directory. See docs/DEPLOY.md.

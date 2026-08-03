@@ -1,54 +1,87 @@
 // ============================================================
-// Forge — deployment environments
-// ============================================================
-// GET  /api/forge/projects/[id]/environments       — list environments
-// POST /api/forge/projects/[id]/environments       — create environment
+// Forge — deployment environments for a project
+// GET  /api/forge/projects/[id]/environments
+// POST /api/forge/projects/[id]/environments
 // ============================================================
 import type { NextRequest } from 'next/server';
 import { db } from '@/lib/db';
+import { ok, created, fail, notFound, serverError } from '@/lib/forge/response';
+import { audit } from '@/lib/forge/audit';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
-export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }): Promise<Response> {
+const NAME_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
+
+export async function GET(
+  _request: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+): Promise<Response> {
   try {
     const { id } = await params;
-    const envs = await db.environment.findMany({
+    const project = await db.project.findUnique({
+      where: { id },
+      select: { id: true },
+    });
+    if (!project) return notFound('Project not found');
+
+    const environments = await db.environment.findMany({
       where: { projectId: id },
-      include: { deployments: { orderBy: { createdAt: 'desc' }, take: 5 } },
+      include: {
+        deployments: { orderBy: { createdAt: 'desc' }, take: 1 },
+      },
       orderBy: { name: 'asc' },
     });
-    return Response.json({ environments: envs });
-  } catch (e) {
-    return Response.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 });
+    return ok(environments);
+  } catch (err) {
+    return serverError(err);
   }
 }
 
-export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }): Promise<Response> {
+export async function POST(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+): Promise<Response> {
   try {
     const { id } = await params;
-    const body = await req.json() as {
-      name: string;
+    const project = await db.project.findUnique({
+      where: { id },
+      select: { id: true, name: true },
+    });
+    if (!project) return notFound('Project not found');
+
+    const body = (await request.json()) as {
+      name?: string;
       description?: string;
       requiresApproval?: boolean;
       requiredReviewers?: number;
-      url?: string;
     };
-    if (!body.name?.trim()) {
-      return Response.json({ error: 'name is required' }, { status: 400 });
+    const name = (body.name ?? '').trim().toLowerCase();
+    if (!NAME_RE.test(name)) {
+      return fail('Invalid environment name (a-z, 0-9, dashes; max 40 chars)');
     }
-    const env = await db.environment.create({
+
+    const existing = await db.environment.findUnique({
+      where: { projectId_name: { projectId: id, name } },
+    });
+    if (existing) return fail(`Environment "${name}" already exists`, 409);
+
+    const environment = await db.environment.create({
       data: {
         projectId: id,
-        name: body.name.trim(),
+        name,
         description: body.description ?? null,
         requiresApproval: body.requiresApproval ?? false,
         requiredReviewers: body.requiredReviewers ?? 0,
-        url: body.url ?? null,
       },
     });
-    return Response.json({ environment: env }, { status: 201 });
-  } catch (e) {
-    return Response.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 });
+
+    await audit('environment.created', 'environment', environment.id, undefined, {
+      projectId: id,
+      name,
+    });
+    return created(environment);
+  } catch (err) {
+    return serverError(err);
   }
 }
