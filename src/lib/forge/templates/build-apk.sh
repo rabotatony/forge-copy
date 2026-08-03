@@ -166,8 +166,11 @@ fi
 echo "Main HTML    : $INDEX_HTML"
 
 # Copy the whole project (minus heavy dirs) into web-assets so the
-# WebView can load relative paths. We keep it flat under assets/www.
-WEB_WWW="$WEB_ASSETS/assets/www"
+# WebView can load relative paths. We keep it flat under www/.
+# BUGFIX(2026-08): previously "$WEB_ASSETS/assets/www" which produced
+# android_asset/assets/www/... while MainActivity loads android_asset/www/...
+# (assets.srcDirs points at $WEB_ASSETS). Keep files under www/ to match the loadUrl.
+WEB_WWW="$WEB_ASSETS/www"
 mkdir -p "$WEB_WWW"
 SKIP_DIRS=(node_modules .git dist build .next target __pycache__ .venv venv .cache)
 
