@@ -216,7 +216,7 @@ export async function attachWorkerCustomDomain(creds: CfCredentials, scriptName:
 export interface CfPagesProject { name: string; subdomain?: string; domains?: Array<{ domain: string }>; }
 
 export async function listPagesProjects(creds: CfCredentials): Promise<CfPagesProject[]> {
-  const r = await cfFetch<CfPagesProject[]>(creds.token, `/accounts/${creds.accountId}/pages/projects?per_page=50`);
+  const r = await cfFetch<CfPagesProject[]>(creds.token, `/accounts/${creds.accountId}/pages/projects`);
   return r.result ?? [];
 }
 
