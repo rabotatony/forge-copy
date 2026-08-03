@@ -30,6 +30,8 @@ const AIInsights = lazy(() => import("./ai-insights").then(m => ({ default: m.AI
 const InsightsPanel = lazy(() => import("./insights-panel").then(m => ({ default: m.InsightsPanel })));
 const OnboardingPanel = lazy(() => import("./onboarding-panel").then(m => ({ default: m.OnboardingPanel })));
 const CapabilityCard = lazy(() => import("./capability-card").then(m => ({ default: m.CapabilityCard })));
+const BuildIntelligencePanel = lazy(() => import("./BuildIntelligencePanel").then(m => ({ default: m.BuildIntelligencePanel })));
+const DeploymentsPanel = lazy(() => import("./DeploymentsPanel").then(m => ({ default: m.DeploymentsPanel })));
 const ActivityTimeline = lazy(() => import("./activity-timeline").then(m => ({ default: m.ActivityTimeline })));
 const RunComparison = lazy(() => import("./run-comparison").then(m => ({ default: m.RunComparison })));
 const RunDiffViewer = lazy(() => import("./run-diff-viewer").then(m => ({ default: m.RunDiffViewer })));
@@ -198,6 +200,9 @@ export function ProjectWorkspace({
 
             {/* Capability Card — what Forge detected + what it can do */}
             <CapabilityCard projectId={projectId} />
+
+            {/* Build Intelligence — capabilities + one-click config generation */}
+            <BuildIntelligencePanel projectId={projectId} />
 
             {/* Insights — profile-aware recommendations */}
             <InsightsPanel projectId={projectId} onRunStarted={onOpenRun} />
@@ -556,7 +561,7 @@ function ConfigureTabs({ projectId }: { projectId: string }) {
         ))}
       </div>
       {subTab === "build" && (<div className="space-y-4"><SecretsTab projectId={projectId} /><EnvVarsEditor projectId={projectId} /><CacheTab projectId={projectId} /></div>)}
-      {subTab === "automate" && (<div className="space-y-4"><TriggersTab projectId={projectId} /><NotificationsTab projectId={projectId} /><EnvironmentsPanel projectId={projectId} /></div>)}
+      {subTab === "automate" && (<div className="space-y-4"><TriggersTab projectId={projectId} /><NotificationsTab projectId={projectId} /><EnvironmentsPanel projectId={projectId} /><DeploymentsPanel projectId={projectId} /></div>)}
       {subTab === "access" && (<div className="space-y-4"><ApiTokensPanel /><SettingsTab projectId={projectId} /></div>)}
     </div>
   );
