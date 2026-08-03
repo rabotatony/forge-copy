@@ -2,6 +2,7 @@ import type { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { getLiveState, scheduleLiveBuild } from "@/lib/forge/live";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -26,7 +27,18 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
         if (existed) updated++; else created++;
       } catch {}
     }
-    return Response.json({ ok: true, updated, created });
+
+    // Live mode: debounce-rebuild after saves so the preview link
+    // reflects the latest edit within ~2 seconds.
+    let liveScheduled = false;
+    try {
+      if (updated + created > 0 && getLiveState(id).enabled) {
+        scheduleLiveBuild(id);
+        liveScheduled = true;
+      }
+    } catch {}
+
+    return Response.json({ ok: true, updated, created, liveScheduled });
   } catch (e) {
     return Response.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 });
   }
