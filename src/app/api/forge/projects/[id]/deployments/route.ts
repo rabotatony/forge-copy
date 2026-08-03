@@ -1,7 +1,18 @@
+
 // ============================================================
 // Forge — deployments for a project
 // GET  /api/forge/projects/[id]/deployments  — history
 // POST /api/forge/projects/[id]/deployments  — publish now
+//
+// POST body:
+//   environmentId  required
+//   source         'workspace' | 'run'        (default: workspace)
+//   runId          required when source='run'
+//   outputDir      e.g. 'dist' or '.next/standalone'
+//   kind           'static' | 'node'          (default: static)
+//   startCommand   node only, e.g. 'node server.js' (default)
+//   hosts          node only: custom domains, e.g. ['shoshana.app']
+//   deployedBy     optional label
 // ============================================================
 import type { NextRequest } from 'next/server';
 import * as fs from 'node:fs';
@@ -12,8 +23,11 @@ import { extractDir, runArtifactDir } from '@/lib/forge/storage';
 import {
   projectSlug,
   publishRelease,
+  publishNodeRelease,
   provisionCaddySite,
   resolveOutputDir,
+  serviceControl,
+  isValidHost,
 } from '@/lib/forge/deploy';
 
 export const dynamic = 'force-dynamic';
@@ -58,13 +72,29 @@ export async function POST(
       runId?: string;
       outputDir?: string;
       deployedBy?: string;
+      kind?: 'static' | 'node';
+      startCommand?: string;
+      hosts?: string[];
     };
     if (!body.environmentId) return fail('Missing environmentId');
+
+    const kind = body.kind === 'node' ? 'node' : 'static';
 
     const environment = await db.environment.findFirst({
       where: { id: body.environmentId, projectId: id },
     });
     if (!environment) return notFound('Environment not found');
+
+    // ---- Validate custom hosts (node apps) ---------------------
+    const hosts: string[] = [];
+    if (kind === 'node' && Array.isArray(body.hosts)) {
+      for (const h of body.hosts.slice(0, 8)) {
+        const host = String(h).trim().toLowerCase();
+        if (!host) continue;
+        if (!isValidHost(host)) return fail(`Invalid host: ${host}`);
+        hosts.push(host);
+      }
+    }
 
     // ---- Resolve the source root -------------------------------
     let rootDir: string;
@@ -104,6 +134,72 @@ export async function POST(
 
     try {
       const slug = projectSlug(project);
+
+      if (kind === 'node') {
+        // ---------- Node app deploy -----------------------------
+        const result = publishNodeRelease({
+          slug,
+          sourceDir,
+          startCommand: body.startCommand,
+          meta: {
+            projectId: project.id,
+            environment: environment.name,
+            deploymentId: deployment.id,
+            hosts,
+          },
+        });
+
+        const { host } = provisionCaddySite({
+          slug,
+          mode: 'app',
+          upstreamPort: result.port,
+          aliases: hosts,
+        });
+
+        // Best-effort (re)start of the systemd service. When Forge
+        // has no permission for systemctl we return manual commands.
+        const service = serviceControl(slug, 'restart');
+
+        const url = hosts.length > 0 ? `https://${hosts[0]}` : result.url;
+        if (url && url !== environment.url) {
+          await db.environment.update({
+            where: { id: environment.id },
+            data: { url },
+          });
+        }
+        const updated = await db.deployment.update({
+          where: { id: deployment.id },
+          data: { status: 'success', version: result.version, deployedAt: new Date() },
+        });
+
+        await audit('deploy.created', 'deployment', updated.id, undefined, {
+          projectId: project.id,
+          environment: environment.name,
+          kind: 'node',
+          version: result.version,
+          files: result.files,
+          bytes: result.bytes,
+          port: result.port,
+          host,
+          hosts,
+          serviceOk: service.ok,
+        });
+
+        return created({
+          ...updated,
+          kind: 'node',
+          url,
+          host,
+          hosts,
+          port: result.port,
+          serviceName: result.serviceName,
+          service,
+          files: result.files,
+          bytes: result.bytes,
+        });
+      }
+
+      // ---------- Static deploy ---------------------------------
       const result = publishRelease({
         slug,
         sourceDir,
@@ -130,6 +226,7 @@ export async function POST(
       await audit('deploy.created', 'deployment', updated.id, undefined, {
         projectId: project.id,
         environment: environment.name,
+        kind: 'static',
         version: result.version,
         files: result.files,
         bytes: result.bytes,
@@ -138,6 +235,7 @@ export async function POST(
 
       return created({
         ...updated,
+        kind: 'static',
         url,
         host,
         files: result.files,
