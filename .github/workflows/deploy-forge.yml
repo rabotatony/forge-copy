@@ -25,8 +25,11 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       - run: bunx opennextjs-cloudflare build
-        env: {DATABASE_URL: "file:./storage/forge.db"}
+        env:
+          DATABASE_URL: "file:./storage/forge.db"
+          FORGE_ENCRYPTION_KEY: ${{ secrets.FORGE_ENCRYPTION_KEY }}
       - run: bunx wrangler deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          FORGE_ENCRYPTION_KEY: ${{ secrets.FORGE_ENCRYPTION_KEY }}
