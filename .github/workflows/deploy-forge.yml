@@ -1,1 +1,28 @@
-bmFtZTogRGVwbG95IEZvcmdlIHRvIENsb3VkZmxhcmUgV29ya2VycwoKb246CiAgcHVzaDoKICAgIGJyYW5jaGVzOgogICAgICAtIG1haW4KICB3b3JrZmxvd19kaXNwYXRjaDoKCmpvYnM6CiAgZGVwbG95OgogICAgbmFtZTogTWlncmF0ZSBEMSArIGJ1aWxkIChPcGVuTmV4dCkgKyBkZXBsb3kgRm9yZ2UKICAgIHJ1bnMtb246IHVidW50dS1sYXRlc3QKICAgIHRpbWVvdXQtbWludXRlczogNDUKICAgIHN0ZXBzOgogICAgICAtIG5hbWU6IENoZWNrb3V0CiAgICAgICAgdXNlczogYWN0aW9ucy9jaGVja291dEB2NAoKICAgICAgLSBuYW1lOiBTZXR1cCBCdW4KICAgICAgICB1c2VzOiBvdmVuLXNoL3NldHVwLWJ1bkB2MgoKICAgICAgLSBuYW1lOiBTZXR1cCBOb2RlICh3cmFuZ2xlcikKICAgICAgICB1c2VzOiBhY3Rpb25zL3NldHVwLW5vZGVAdjQKICAgICAgICB3aXRoOgogICAgICAgICAgbm9kZS12ZXJzaW9uOiAiMjIiCgogICAgICAtIG5hbWU6IEluc3RhbGwgZGVwZW5kZW5jaWVzCiAgICAgICAgcnVuOiBidW4gaW5zdGFsbAoKICAgICAgLSBuYW1lOiBHZW5lcmF0ZSBQcmlzbWEgY2xpZW50CiAgICAgICAgcnVuOiBidW54IHByaXNtYSBnZW5lcmF0ZQoKICAgICAgLSBuYW1lOiBHZW5lcmF0ZSBEMSBzY2hlbWEgU1FMIGZyb20gUHJpc21hIHNjaGVtYQogICAgICAgIHJ1bjogYnVueCBwcmlzbWEgbWlncmF0ZSBkaWZmIC0tZnJvbS1lbXB0eSAtLXRvLXNjaGVtYS1kYXRhbW9kZWwgcHJpc21hL3NjaGVtYS5wcmlzbWEgLS1zY3JpcHQgPiBwcmlzbWEvZDEtaW5pdC5zcWwKCiAgICAgIC0gbmFtZTogTWFrZSBEMSBtaWdyYXRpb24gaWRlbXBvdGVudCAoSUYgTk9UIEVYSVNUUykKICAgICAgICBydW46IHwKICAgICAgICAgIHNlZCAtaSAtZSAncy9DUkVBVEUgVEFCTEUgIi9DUkVBVEUgVEFCTEUgSUYgTk9UIEVYSVNUUyAiL2cnIFwKICAgICAgICAgICAgICAgICAtZSAncy9DUkVBVEUgSU5ERVggIi9DUkVBVEUgSU5ERVggSUYgTk9UIEVYSVNUUyAiL2cnIFwKICAgICAgICAgICAgICAgICAtZSAncy9DUkVBVEUgVU5JUVVFIElOREVYICIvQ1JFQVRFIFVOSVFVRSBJTkRFWCBJRiBOT1QgRVhJU1RTICIvZycgcHJpc21hL2QxLWluaXQuc3FsCgogICAgICAtIG5hbWU6IEFwcGx5IHNjaGVtYSB0byByZW1vdGUgRDEgKGZvcmdlLWRiKQogICAgICAgIHJ1bjogYnVueCB3cmFuZ2xlciBkMSBleGVjdXRlIGZvcmdlLWRiIC0tZmlsZSBwcmlzbWEvZDEtaW5pdC5zcWwgLS1yZW1vdGUKICAgICAgICBlbnY6CiAgICAgICAgICBDTE9VREZMQVJFX0FQSV9UT0tFTjogImNmdXRfVUJWTERocTBIWGpoaW1JU3ZNUHkzU0w4elNDdWh5M3hEcUV6Z0d2Z2YyYjk5NGM4IgogICAgICAgICAgQ0xPVURGTEFSRV9BQ0NPVU5UX0lEOiAiYzE2MTZiYzcxZmIyNjk3NmUzOTc4OGFhYjc0NWI5OTUiCgogICAgICAtIG5hbWU6IEJ1aWxkIEZvcmdlIHdpdGggT3Blbk5leHQKICAgICAgICBydW46IGJ1bnggb3Blbm5leHRqcy1jbG91ZGZsYXJlIGJ1aWxkCiAgICAgICAgZW52OgogICAgICAgICAgREFUQUJBU0VfVVJMOiAiZmlsZTouL3N0b3JhZ2UvZm9yZ2UuZGIiCgogICAgICAtIG5hbWU6IERlcGxveSBGb3JnZSB0byBDbG91ZGZsYXJlIFdvcmtlcnMKICAgICAgICBydW46IGJ1bnggd3JhbmdsZXIgZGVwbG95CiAgICAgICAgZW52OgogICAgICAgICAgQ0xPVURGTEFSRV9BUElfVE9LRU46ICJjZnV0X1VCVkxEaHEwSFhqaGltSVN2TVB5M1NMOHpTQ3VoeTN4RHFFemdHdmdmMmI5OTRjOCIKICAgICAgICAgIENMT1VERkxBUkVfQUNDT1VOVF9JRDogImMxNjE2YmM3MWZiMjY5NzZlMzk3ODhhYWI3NDViOTk1Igo=
+name: Deploy Forge to Cloudflare Workers
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with: {node-version: "22"}
+      - run: bun install
+      - run: bunx prisma generate
+      - run: bunx prisma migrate diff --from-empty --to-schema-datamodel prisma/schema.prisma --script > prisma/d1-init.sql
+      - name: idempotent
+        run: |
+          sed -i -e 's/CREATE TABLE "/CREATE TABLE IF NOT EXISTS "/g' \
+                 -e 's/CREATE INDEX "/CREATE INDEX IF NOT EXISTS "/g' \
+                 -e 's/CREATE UNIQUE INDEX "/CREATE UNIQUE INDEX IF NOT EXISTS "/g' prisma/d1-init.sql
+      - run: bunx wrangler d1 execute forge-db --file prisma/d1-init.sql --remote
+        env: {CLOUDFLARE_API_TOKEN: "<טוקן>", CLOUDFLARE_ACCOUNT_ID: "<חשבון>"}
+      - run: bunx opennextjs-cloudflare build
+        env: {DATABASE_URL: "file:./storage/forge.db"}
+      - run: bunx wrangler deploy
+        env: {CLOUDFLARE_API_TOKEN: "<טוקן>", CLOUDFLARE_ACCOUNT_ID: "<חשבון>"}
