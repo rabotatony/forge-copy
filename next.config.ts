@@ -1,6 +1,7 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  serverComponentsExternalPackages: ["react-syntax-highlighter", "typescript", "sharp"],
   turbopack: {
     externalPackages: ["typescript"],
   },
