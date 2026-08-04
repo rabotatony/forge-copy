@@ -1,6 +1,10 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  webpack: (config: any) => {
+    config.externals = [...(config.externals || []), "typescript"];
+    return config;
+  },
   serverExternalPackages: ["typescript"],
   reactStrictMode: false,
   // standalone output so the Docker container can run .next/standalone/server.js
