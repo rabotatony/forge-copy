@@ -106,7 +106,7 @@ export async function POST(request: NextRequest): Promise<Response> {
 
     // --- detect + analyze ---
     const detection = detectProject(extract);
-    let analysis = null;
+    let analysis: ReturnType<typeof analyzeProject> | null = null;
     try {
       analysis = analyzeProject(extract);
     } catch {
