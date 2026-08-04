@@ -21,8 +21,12 @@ jobs:
                  -e 's/CREATE INDEX "/CREATE INDEX IF NOT EXISTS "/g' \
                  -e 's/CREATE UNIQUE INDEX "/CREATE UNIQUE INDEX IF NOT EXISTS "/g' prisma/d1-init.sql
       - run: bunx wrangler d1 execute forge-db --file prisma/d1-init.sql --remote
-        env: {CLOUDFLARE_API_TOKEN: "<טוקן>", CLOUDFLARE_ACCOUNT_ID: "<חשבון>"}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       - run: bunx opennextjs-cloudflare build
         env: {DATABASE_URL: "file:./storage/forge.db"}
       - run: bunx wrangler deploy
-        env: {CLOUDFLARE_API_TOKEN: "<טוקן>", CLOUDFLARE_ACCOUNT_ID: "<חשבון>"}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
