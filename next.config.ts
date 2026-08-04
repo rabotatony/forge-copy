@@ -2,6 +2,8 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   reactStrictMode: false,
+  // standalone output so the Docker container can run .next/standalone/server.js
+  output: "standalone",
   typescript: {
     ignoreBuildErrors: true,
   },
