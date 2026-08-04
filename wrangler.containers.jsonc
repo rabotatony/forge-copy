@@ -1,7 +1,7 @@
 {
   "name": "forge",
   "main": "src/worker.ts",
-  "compatibility_date": "2025-06-01",
+  "compatibility_date": "2026-08-01",
   "containers": [
     { "max_instances": 2, "class_name": "ForgeContainer", "image": "./Dockerfile" }
   ],
