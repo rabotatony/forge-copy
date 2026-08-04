@@ -4,5 +4,13 @@ import { defineCloudflareConfig } from "@opennextjs/cloudflare";
 // Bindings (D1 = DB, R2 = STORAGE) are defined in wrangler.jsonc.
 // Externalize node-only modules that cannot be bundled for Workers.
 export default defineCloudflareConfig({
-  edgeExternals: ["typescript"],
+  openNext: {
+    build: {
+      override: {
+        esbuild: {
+          external: ["typescript"],
+        },
+      },
+    },
+  },
 });
