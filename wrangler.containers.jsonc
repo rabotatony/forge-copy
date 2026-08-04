@@ -1,0 +1,13 @@
+{
+  "name": "forge",
+  "main": "src/worker.ts",
+  "compatibility_date": "2025-06-01",
+  "containers": [
+    { "max_instances": 2, "class_name": "ForgeContainer", "image": "./Dockerfile" }
+  ],
+  "durable_objects": {
+    "bindings": [ { "name": "FORGE_CONTAINER", "class_name": "ForgeContainer" } ]
+  },
+  "migrations": [ { "tag": "v1", "new_sqlite_classes": ["ForgeContainer"] } ],
+  "observability": { "enabled": true }
+}
