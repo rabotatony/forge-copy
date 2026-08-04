@@ -13,8 +13,8 @@ import * as fs from "node:fs";
 import { db } from "@/lib/db";
 import { projectDir, extractDir, ensureDirs } from "@/lib/forge/storage";
 import { detectProject } from "@/lib/forge/detector";
-import { analyzeProject } from "@/lib/forge/analyzer";
-import { planForAnalysis } from "@/lib/forge/universal";
+import { analyzeProject, type ProjectAnalysis } from "@/lib/forge/analyzer";
+import { planForAnalysis, type UniversalPlan } from "@/lib/forge/universal";
 import { cloneRepo, detectProvider } from "@/lib/forge/git";
 import { isForbiddenUrl } from "@/lib/forge/security";
 import { setLiveState, runLiveBuild } from "@/lib/forge/live";
@@ -87,11 +87,12 @@ export async function POST(request: NextRequest): Promise<Response> {
     }
 
     const detection = detectProject(extract);
-    let analysis = null;
-    let plan = null;
+    let analysis: ProjectAnalysis | null = null;
+    let plan: UniversalPlan | null = null;
     try {
-      analysis = analyzeProject(extract);
-      plan = planForAnalysis(analysis);
+      const a = analyzeProject(extract);
+      analysis = a;
+      plan = planForAnalysis(a);
     } catch { /* best-effort */ }
 
     const rawName = (typeof body.name === "string" ? body.name.trim() : "") || deriveNameFromUrl(url);
