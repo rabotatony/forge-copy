@@ -2,6 +2,11 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   serverComponentsExternalPackages: ["react-syntax-highlighter", "typescript", "sharp"],
+  webpack: (config: any) => {
+    config.externals = [...(config.externals || []), "typescript"];
+    return config;
+  },
+  serverComponentsExternalPackages: ["react-syntax-highlighter", "typescript", "sharp"],
   turbopack: {
     externalPackages: ["typescript"],
   },
