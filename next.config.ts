@@ -1,6 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  turbopack: {
+    external: ["typescript"],
+  },
   serverExternalPackages: ["typescript"],
   reactStrictMode: false,
   // standalone output so the Docker container can run .next/standalone/server.js
