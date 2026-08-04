@@ -2,7 +2,7 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   turbopack: {
-    external: ["typescript"],
+    externalPackages: ["typescript"],
   },
   serverExternalPackages: ["typescript"],
   reactStrictMode: false,
