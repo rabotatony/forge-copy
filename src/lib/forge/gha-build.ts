@@ -230,9 +230,12 @@ export async function getGhaArtifacts(runId: number, token?: string): Promise<Gh
 // ---------------------------------------------------------------------------
 // Signed source tokens — let a free GitHub runner download an uploaded
 // project straight from Forge (R2 / fs) without any stored state.
-// token = projectId.base64url(HMAC-SHA256(projectId, secret))
-// WebCrypto only: works identically on Workers and Node.
+// token = projectId.hmacHex  where hmacHex = HMAC-SHA256(projectId, secret).
+// node:crypto only — the same pattern the vault (secrets.ts) already uses
+// successfully on Workers (nodejs_compat) and self-hosted Node.
 // ---------------------------------------------------------------------------
+
+import * as crypto from "node:crypto";
 
 function sourceSecret(): string {
   return (
@@ -244,45 +247,25 @@ function sourceSecret(): string {
   );
 }
 
-function b64url(buf: ArrayBuffer | Uint8Array): string {
-  const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
-  let bin = "";
-  for (const b of bytes) bin += String.fromCharCode(b);
-  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+export function signSourceToken(projectId: string): string {
+  const sig = crypto.createHmac("sha256", sourceSecret()).update(projectId).digest("hex");
+  return `${projectId}.${sig}`;
 }
 
-async function hmacKey(): Promise<CryptoKey> {
-  const enc = new TextEncoder().encode(sourceSecret());
-  return crypto.subtle.importKey("raw", enc, { name: "HMAC", hash: "SHA-256" }, false, [
-    "sign",
-    "verify",
-  ]);
-}
-
-export async function signSourceToken(projectId: string): Promise<string> {
-  const key = await hmacKey();
-  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(projectId));
-  return `${projectId}.${b64url(sig)}`;
-}
-
-export async function verifySourceToken(token: string): Promise<string | null> {
+export function verifySourceToken(token: string): string | null {
   const dot = token.lastIndexOf(".");
   if (dot <= 0) return null;
   const projectId = token.slice(0, dot);
-  const sigB64 = token.slice(dot + 1).replace(/-/g, "+").replace(/_/g, "/");
+  const sig = token.slice(dot + 1);
+  if (!/^[0-9a-f]{64}$/.test(sig)) return null;
+  const expected = crypto
+    .createHmac("sha256", sourceSecret())
+    .update(projectId)
+    .digest("hex");
   try {
-    const pad = sigB64 + "=".repeat((4 - (sigB64.length % 4)) % 4);
-    const raw = atob(pad);
-    const sigBytes = new Uint8Array(raw.length);
-    for (let i = 0; i < raw.length; i++) sigBytes[i] = raw.charCodeAt(i);
-    const key = await hmacKey();
-    const ok = await crypto.subtle.verify(
-      "HMAC",
-      key,
-      sigBytes,
-      new TextEncoder().encode(projectId),
-    );
-    return ok ? projectId : null;
+    const a = Buffer.from(sig, "hex");
+    const b = Buffer.from(expected, "hex");
+    return crypto.timingSafeEqual(a, b) ? projectId : null;
   } catch {
     return null;
   }
