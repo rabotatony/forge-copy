@@ -1,5 +1,10 @@
 name: Deploy Forge to Cloudflare Containers
 # Bootstrap: builds Forge Docker image and deploys to Cloudflare Containers.
+#
+# Cloudflare Containers requires the Workers Paid plan ($5/month) to be
+# enabled on the account. Until then this workflow probes the account
+# capability and skips gracefully instead of failing CI on every push.
+# Once Containers is enabled the deploy runs automatically again.
 
 on:
   push:
@@ -20,25 +25,54 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Check Cloudflare Containers availability
+        id: containers_gate
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          probe() {
+            curl -sS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID$1" || true
+          }
+          R1=$(probe "/containers/settings")
+          R2=$(probe "/containers/images")
+          echo "Probe /containers/settings: $R1"
+          echo "Probe /containers/images: $R2"
+          if echo "$R1$R2" | grep -q '"success":true'; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          elif echo "$R1" | grep -q 'No route for that URI' && echo "$R2" | grep -q 'No route for that URI'; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Cloudflare Containers is NOT enabled on this account - it requires the Workers Paid plan (\$5/month)."
+            echo "::warning::Upgrade the account to Workers Paid and this deploy will start running automatically. Skipping container deploy."
+          else
+            # Routes exist but errored (e.g. token permission gap) - attempt the deploy and surface the real error.
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Setup Bun
+        if: steps.containers_gate.outputs.available == 'true'
         uses: oven-sh/setup-bun@v2
 
       - name: Setup Node
+        if: steps.containers_gate.outputs.available == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: "22"
 
       - name: Install dependencies
+        if: steps.containers_gate.outputs.available == 'true'
         run: bun install
 
       - name: Generate Prisma client
+        if: steps.containers_gate.outputs.available == 'true'
         run: bunx prisma generate
 
       # Docker is pre-installed on ubuntu-latest runners.
       # wrangler deploy builds the Docker image and pushes it to
       # Cloudflare's container registry, then deploys the Worker+Container.
       - name: Deploy Forge to Cloudflare Containers
-# Bootstrap: builds Forge Docker image and deploys to Cloudflare Containers.
+        if: steps.containers_gate.outputs.available == 'true'
         run: bunx wrangler deploy --config wrangler.containers.jsonc
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
