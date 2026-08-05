@@ -1,0 +1,13 @@
+.git
+.github
+.next
+node_modules
+storage
+.forge
+dev.log
+server.log
+*.log
+.env
+.env.*
+prisma/*.db
+docker-compose.yml

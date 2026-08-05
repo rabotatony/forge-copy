@@ -1,0 +1,34 @@
+# ============================================================
+# Sovereign Forge — one command to your own CI/CD platform.
+#
+#   docker compose up -d --build
+#
+# Forge runs fully self-contained: Node + SQLite + local storage.
+# No Cloudflare, no paid plans, no external CI.
+#
+# Optional env:
+#   FORGE_ENCRYPTION_KEY  secret-vault key (generate with: openssl rand -hex 32)
+#   FORGE_DOMAIN          base domain for published sites (see docs/DEPLOY.md)
+#
+# Public exposure (free, no account):  bash scripts/expose-forge.sh
+# ============================================================
+services:
+  forge:
+    build: .
+    image: forge:latest
+    container_name: forge
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: "file:/data/forge.db"
+      FORGE_SITES_ROOT: "/data/sites"
+      # FORGE_ENCRYPTION_KEY: "openssl-rand-hex-32-here"
+      # FORGE_DOMAIN: "forge.example.com"
+    volumes:
+      - forge-data:/data
+      - forge-storage:/app/storage
+
+volumes:
+  forge-data:
+  forge-storage:

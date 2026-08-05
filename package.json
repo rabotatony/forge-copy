@@ -12,9 +12,9 @@
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:reset": "prisma migrate reset",
-    "build:cf": "opennextjs-cloudflare build",
-    "deploy:cf": "opennextjs-cloudflare build && wrangler deploy",
-    "preview:cf": "opennextjs-cloudflare dev",
+    "build:cf": "FORGE_BUILD_TARGET=cloudflare opennextjs-cloudflare build",
+    "deploy:cf": "FORGE_BUILD_TARGET=cloudflare opennextjs-cloudflare build && wrangler deploy",
+    "preview:cf": "FORGE_BUILD_TARGET=cloudflare opennextjs-cloudflare dev",
     "db:gen:d1": "prisma migrate diff --from-empty --to-schema-datamodel prisma/schema.prisma --script > prisma/d1-init.sql",
     "db:apply:d1": "wrangler d1 execute forge-db --file prisma/d1-init.sql"
   },

@@ -1,28 +1,33 @@
 import type { NextConfig } from "next";
 
+// ============================================================
+// Forge — Next.js config (dual-target)
+// ============================================================
+// Self-hosted / Docker builds (bun run build) NEED standalone
+// output — .next/standalone/server.js is what bootstrap-forge.sh,
+// the Dockerfile and `bun run start` all execute.
+//
+// Cloudflare builds (opennextjs-cloudflare build) must NOT use
+// standalone output — OpenNext produces its own worker bundle.
+// CI and build:cf set FORGE_BUILD_TARGET=cloudflare to select that mode.
+// ============================================================
+const isCloudflareBuild = process.env.FORGE_BUILD_TARGET === "cloudflare";
+
 const nextConfig: NextConfig = {
-  // Externalize typescript so Turbopack does not bundle it for Workers.
+  // Keep heavy Node-only packages out of the Workers bundle (defensive —
+  // Forge itself no longer imports `typescript` on the server).
   serverExternalPackages: ["typescript", "sharp"],
-  turbopack: {
-    externalPackages: ["typescript", "sharp"],
-  },
-  // Externalize typescript so Turbopack does not bundle it for Workers.
-  serverExternalPackages: ["typescript", "sharp"],
-  turbopack: {
-    externalPackages: ["typescript", "sharp"],
-  },
   reactStrictMode: false,
   typescript: {
     ignoreBuildErrors: true,
   },
   experimental: {
-    turbo: false,
     serverActions: { bodySizeLimit: "50mb" },
   },
-  webpack: (config: any) => {
-    config.externals = [...(config.externals || []), "typescript"];
-    return config;
-  },
 };
+
+if (!isCloudflareBuild) {
+  nextConfig.output = "standalone";
+}
 
 export default nextConfig;

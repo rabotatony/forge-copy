@@ -27,6 +27,7 @@ jobs:
       - run: bunx opennextjs-cloudflare build
         env:
           DATABASE_URL: "file:./storage/forge.db"
+          FORGE_BUILD_TARGET: cloudflare
           FORGE_ENCRYPTION_KEY: ${{ secrets.FORGE_ENCRYPTION_KEY }}
       - run: bunx wrangler deploy
         env:
