@@ -1,25 +1,15 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  serverComponentsExternalPackages: ["react-syntax-highlighter", "typescript", "sharp"],
-  webpack: (config: any) => {
-    config.externals = [...(config.externals || []), "typescript"];
-    return config;
-  },
-  serverComponentsExternalPackages: ["react-syntax-highlighter", "typescript", "sharp"],
-  turbopack: {
-    externalPackages: ["typescript"],
-  },
-  serverExternalPackages: ["typescript"],
   reactStrictMode: false,
-  // standalone output so the Docker container can run .next/standalone/server.js
-  output: "standalone",
+  // Externalize typescript so Turbopack does not bundle it for Workers.
+  serverExternalPackages: ["typescript", "sharp"],
+  turbopack: {
+    externalPackages: ["typescript", "sharp"],
+  },
   typescript: {
     ignoreBuildErrors: true,
   },
-  // Forge runs real child processes (spawn) and uses Node APIs (fs, crypto,
-  // readline) that are unavailable in the Edge runtime. Force the Node
-  // runtime for all server-side code by leaving the default runtime.
   experimental: {
     serverActions: { bodySizeLimit: "50mb" },
   },
