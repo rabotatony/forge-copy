@@ -19,9 +19,13 @@ on:
         type: string
         required: true
       source_url:
-        description: "Download URL of the project tarball (tar.gz)"
+        description: "Download URL of the project source archive"
         type: string
         required: true
+      source_kind:
+        description: "Archive kind: tar (tar.gz) or zip"
+        type: string
+        default: "tar"
       build_cmd:
         description: "Explicit build command (empty = auto-detect toolchain)"
         type: string
@@ -42,6 +46,7 @@ jobs:
     env:
       RUN_ID: ${{ inputs.run_id }}
       SOURCE_URL: ${{ inputs.source_url }}
+      SOURCE_KIND: ${{ inputs.source_kind }}
       BUILD_CMD: ${{ inputs.build_cmd }}
       CALLBACK_URL: ${{ inputs.callback_url }}
       CALLBACK_TOKEN: ${{ inputs.callback_token }}
@@ -70,8 +75,17 @@ jobs:
       - name: Download project source
         run: |
           mkdir -p project
-          curl -fsSL "$SOURCE_URL" -o /tmp/src.tar.gz
-          tar -xzf /tmp/src.tar.gz -C project
+          if [ "$SOURCE_KIND" = "zip" ]; then
+            curl -fsSL "$SOURCE_URL" -o /tmp/src.zip
+            if command -v unzip >/dev/null 2>&1; then
+              unzip -q /tmp/src.zip -d project
+            else
+              python3 -c "import zipfile; zipfile.ZipFile('/tmp/src.zip').extractall('project')"
+            fi
+          else
+            curl -fsSL "$SOURCE_URL" -o /tmp/src.tar.gz
+            tar -xzf /tmp/src.tar.gz -C project
+          fi
           echo "--- source extracted ---"
           ls project | head -40
 

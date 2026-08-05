@@ -66,7 +66,9 @@ function randomTag(): string {
 export async function dispatchGhaBuild(args: {
   forgeRunId: string;
   sourceUrl: string;
+  sourceKind?: "tar" | "zip";
   buildCmd?: string;
+  publicUrl?: string;
   token?: string;
   repo?: string;
   ref?: string;
@@ -79,7 +81,7 @@ export async function dispatchGhaBuild(args: {
   const ref = args.ref ?? "main";
 
   const callbackToken = process.env.FORGE_GHA_CALLBACK_TOKEN || randomTag();
-  const baseUrl = (process.env.FORGE_PUBLIC_URL ?? "").replace(/\/+$/, "");
+  const baseUrl = (args.publicUrl ?? process.env.FORGE_PUBLIC_URL ?? "").replace(/\/+$/, "");
   const callbackUrl = baseUrl ? `${baseUrl}/api/forge/gha-build/callback` : "";
 
   const res = await gh(`/repos/${repo}/actions/workflows/${WORKFLOW_FILE}/dispatches`, token, {
@@ -89,6 +91,7 @@ export async function dispatchGhaBuild(args: {
       inputs: {
         run_id: args.forgeRunId,
         source_url: args.sourceUrl,
+        source_kind: args.sourceKind ?? "tar",
         build_cmd: args.buildCmd ?? "",
         callback_url: callbackUrl,
         callback_token: callbackToken,
@@ -222,4 +225,65 @@ export async function getGhaArtifacts(runId: number, token?: string): Promise<Gh
     sizeInBytes: a.size_in_bytes,
     downloadUrl: a.archive_download_url,
   }));
+}
+
+// ---------------------------------------------------------------------------
+// Signed source tokens — let a free GitHub runner download an uploaded
+// project straight from Forge (R2 / fs) without any stored state.
+// token = projectId.base64url(HMAC-SHA256(projectId, secret))
+// WebCrypto only: works identically on Workers and Node.
+// ---------------------------------------------------------------------------
+
+function sourceSecret(): string {
+  return (
+    process.env.FORGE_SOURCE_SECRET ||
+    process.env.FORGE_GHA_CALLBACK_TOKEN ||
+    process.env.FORGE_GHA_TOKEN ||
+    process.env.GITHUB_TOKEN ||
+    "forge-insecure-source-secret"
+  );
+}
+
+function b64url(buf: ArrayBuffer | Uint8Array): string {
+  const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+async function hmacKey(): Promise<CryptoKey> {
+  const enc = new TextEncoder().encode(sourceSecret());
+  return crypto.subtle.importKey("raw", enc, { name: "HMAC", hash: "SHA-256" }, false, [
+    "sign",
+    "verify",
+  ]);
+}
+
+export async function signSourceToken(projectId: string): Promise<string> {
+  const key = await hmacKey();
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(projectId));
+  return `${projectId}.${b64url(sig)}`;
+}
+
+export async function verifySourceToken(token: string): Promise<string | null> {
+  const dot = token.lastIndexOf(".");
+  if (dot <= 0) return null;
+  const projectId = token.slice(0, dot);
+  const sigB64 = token.slice(dot + 1).replace(/-/g, "+").replace(/_/g, "/");
+  try {
+    const pad = sigB64 + "=".repeat((4 - (sigB64.length % 4)) % 4);
+    const raw = atob(pad);
+    const sigBytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) sigBytes[i] = raw.charCodeAt(i);
+    const key = await hmacKey();
+    const ok = await crypto.subtle.verify(
+      "HMAC",
+      key,
+      sigBytes,
+      new TextEncoder().encode(projectId),
+    );
+    return ok ? projectId : null;
+  } catch {
+    return null;
+  }
 }
