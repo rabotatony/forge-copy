@@ -42,6 +42,9 @@ async function gh(pathname: string, token: string, init?: RequestInit): Promise<
       Accept: "application/vnd.github+json",
       Authorization: `Bearer ${token}`,
       "X-GitHub-Api-Version": "2022-11-28",
+      // GitHub API rejects requests without a User-Agent (workerd's fetch
+      // does not send one by default).
+      "User-Agent": "forge-gha-build",
       ...(init?.body ? { "Content-Type": "application/json" } : {}),
     },
   });
