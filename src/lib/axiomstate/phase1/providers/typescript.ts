@@ -1,4 +1,5 @@
-import * as ts from 'typescript';
+// typescript import removed for Cloudflare Workers compatibility
+const ts: any = {};
 import * as path from 'node:path';
 import { fileId, symbolId, resolveImport } from '../ids';
 import type { ParserProvider, GraphDelta, GraphNode, GraphEdge } from '../types';
