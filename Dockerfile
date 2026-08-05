@@ -5,16 +5,24 @@
 #
 #   docker compose up -d --build        (recommended)
 #   bash scripts/forge-up.sh            (auto-detects Docker)
+#
+# The image is a COMPLETE build environment so Forge can run
+# everything itself: bun + node for JS/TS builds, python3 + uv
+# for Python runtime builds (.zscripts/python-runtime-build.sh).
 # ============================================================
 FROM node:22-slim
 
 WORKDIR /app
 
-# Toolchain needed for building and for Forge's own build engine
+# Toolchain needed for building and for Forge's own build engine:
+# basics + python3 for Python runtime builds.
 RUN apt-get update -y \
-    && apt-get install -y --no-install-recommends git curl ca-certificates unzip \
+    && apt-get install -y --no-install-recommends git curl ca-certificates unzip python3 python3-venv \
     && rm -rf /var/lib/apt/lists/* \
-    && npm install -g bun
+    && npm install -g bun \
+    && curl -LsSf https://astral.sh/uv/install.sh | sh \
+    && ln -sf /root/.local/bin/uv  /usr/local/bin/uv \
+    && ln -sf /root/.local/bin/uvx /usr/local/bin/uvx
 
 # Sovereign runtime config: SQLite on a persistent volume.
 # FORGE_BUILD_TARGET is NOT set -> next build emits .next/standalone.

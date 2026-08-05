@@ -61,3 +61,32 @@ curl -fsSL https://raw.githubusercontent.com/rabotatony/forge-copy/main/public/m
 - Matches real package.json: build = standalone, start = bun .next/standalone/server.js
 - db:push = prisma db push --accept-data-loss
 - DB at stable absolute path (.forge/forge.db), independent of standalone CWD
+
+## One-command sovereign stack
+
+```bash
+git clone https://github.com/rabotatony/forge-copy forge-src
+bash forge-src/scripts/forge-up.sh
+```
+
+`forge-up.sh`:
+
+1. Provisions every missing environment via `scripts/forge-env.sh`
+   (idempotent): git/curl/unzip, bun, node, python3 + uv (Python runtime
+   builds), docker (optional).
+2. Starts Forge — Docker path preferred (persistent volumes,
+   `restart: unless-stopped`, docker daemon enabled at boot), native
+   bootstrap otherwise (systemd `forge.service`, Restart=always).
+3. Waits for the health check on `:3000/api/health`.
+
+Management:
+
+```bash
+bash scripts/forge-up.sh status   # health + container/service state
+bash scripts/forge-up.sh logs     # tail logs (docker / file / journal)
+bash scripts/forge-up.sh stop     # stop Forge
+bash scripts/forge-up.sh env      # re-provision environments only
+```
+
+Auto-start survives reboots on both paths; nothing phones home and no
+paid service is required.
