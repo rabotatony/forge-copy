@@ -1,6 +1,12 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  webpack: (config: any) => {
+    config.resolve = config.resolve || {};
+    config.resolve.alias = config.resolve.alias || {};
+    config.resolve.alias["typescript"] = false;
+    return config;
+  },
   // Externalize typescript so it is not bundled for Workers.
   serverExternalPackages: ["typescript", "sharp"],
   turbopack: {
