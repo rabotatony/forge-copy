@@ -1,0 +1,138 @@
+name: Forge Remote Build
+# ============================================================
+# Forge's cloud build engine.
+#
+# Dispatched programmatically by Forge via the Actions API
+# (workflow_dispatch). GitHub runs standard runners FREE for
+# public repositories — real Linux VMs with fs + processes,
+# exactly what a CI build needs. No account, no credit card.
+#
+# Flow: Forge uploads the project tarball to R2 -> passes a
+# signed URL here -> this workflow downloads, builds, uploads
+# outputs as an artifact, and reports back to Forge.
+# ============================================================
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Forge run id (for correlation)"
+        type: string
+        required: true
+      source_url:
+        description: "Download URL of the project tarball (tar.gz)"
+        type: string
+        required: true
+      build_cmd:
+        description: "Explicit build command (empty = auto-detect toolchain)"
+        type: string
+        default: ""
+      callback_url:
+        description: "Forge endpoint to report the result to (optional)"
+        type: string
+        default: ""
+      callback_token:
+        description: "Auth token for the callback (optional)"
+        type: string
+        default: ""
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      RUN_ID: ${{ inputs.run_id }}
+      SOURCE_URL: ${{ inputs.source_url }}
+      BUILD_CMD: ${{ inputs.build_cmd }}
+      CALLBACK_URL: ${{ inputs.callback_url }}
+      CALLBACK_TOKEN: ${{ inputs.callback_token }}
+    steps:
+      - name: Mask callback token
+        run: |
+          if [ -n "$CALLBACK_TOKEN" ]; then
+            echo "::add-mask::$CALLBACK_TOKEN"
+          fi
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Setup Python + uv
+        run: |
+          sudo apt-get update -y >/dev/null
+          sudo apt-get install -y python3 python3-venv >/dev/null
+          curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Download project source
+        run: |
+          mkdir -p project
+          curl -fsSL "$SOURCE_URL" -o /tmp/src.tar.gz
+          tar -xzf /tmp/src.tar.gz -C project
+          echo "--- source extracted ---"
+          ls project | head -40
+
+      - name: Build
+        id: build
+        run: |
+          set -o pipefail
+          cd project
+          if [ -n "$BUILD_CMD" ]; then
+            echo ">>> explicit build command"
+            bash -c "$BUILD_CMD" 2>&1 | tee /tmp/build.log
+            exit $?
+          fi
+          if [ -f package.json ]; then
+            if [ -f bun.lock ] || [ -f bun.lockb ]; then
+              bun install --frozen-lockfile 2>&1 | tee /tmp/build.log || bun install 2>&1 | tee -a /tmp/build.log
+              bun run build 2>&1 | tee -a /tmp/build.log
+            else
+              npm install --no-audit --no-fund 2>&1 | tee /tmp/build.log
+              npm run build 2>&1 | tee -a /tmp/build.log
+            fi
+          elif [ -f pyproject.toml ] || [ -f requirements.txt ]; then
+            (uv sync || uv pip install -r requirements.txt) 2>&1 | tee /tmp/build.log
+          else
+            echo "static project — nothing to build" | tee /tmp/build.log
+          fi
+
+      - name: Collect outputs
+        if: always()
+        run: |
+          mkdir -p /tmp/forge-out
+          cp /tmp/build.log /tmp/forge-out/build.log 2>/dev/null || echo "(no build log)" > /tmp/forge-out/build.log
+          cd project
+          for d in dist build .next out .output; do
+            if [ -e "$d" ]; then
+              tar -czf "/tmp/forge-out/$d.tar.gz" "$d" 2>/dev/null || true
+            fi
+          done
+          echo "--- outputs ---"
+          ls -la /tmp/forge-out
+
+      - name: Upload build outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: forge-build-${{ inputs.run_id }}
+          path: /tmp/forge-out
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Report back to Forge
+        if: always()
+        run: |
+          if [ -z "$CALLBACK_URL" ]; then
+            echo "no callback_url — skipping report"
+            exit 0
+          fi
+          STATUS="${{ steps.build.outcome }}"
+          RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          curl -fsS -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-forge-token: $CALLBACK_TOKEN" \
+            --data "{\"runId\":\"$RUN_ID\",\"status\":\"$STATUS\",\"runUrl\":\"$RUN_URL\"}" || \
+            echo "callback failed (non-fatal)"
