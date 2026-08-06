@@ -17,20 +17,20 @@ const TRIGGER_LABELS: Record<string, string> = { manual: "Manual", auto: "Auto-r
 export function ActivityTimeline({ projectId, onOpenRun }: { projectId: string; onOpenRun?: (runId: string) => void }) {
   const { data, isLoading } = useQuery({
     queryKey: ["forge", "activity", projectId],
-    queryFn: async () => { const r = await fetch(`/api/forge/projects/${projectId}/activity`); if (!r.ok) throw new Error("Failed"); return r.json() as Promise<ActivityResponse> },
+    queryFn: async () => { const r = await fetch(`/api/forge/projects/${projectId}/activity-feed`); if (!r.ok) throw new Error("Failed"); return r.json() as Promise<ActivityResponse> },
     refetchInterval: 10_000,
   });
 
   const [filter, setFilter] = useState<"all" | "success" | "failed" | "agent">("all");
+  const timeline = data?.timeline ?? [];
   const filtered = useMemo(() => {
-    if (!data) return [];
-    if (filter === "all") return data.timeline;
-    if (filter === "agent") return data.timeline.filter(t => t.trigger === "auto");
-    return data.timeline.filter(t => t.status === filter);
-  }, [data, filter]);
+    if (filter === "all") return timeline;
+    if (filter === "agent") return timeline.filter(t => t.trigger === "auto");
+    return timeline.filter(t => t.status === filter);
+  }, [timeline, filter]);
 
   if (isLoading || !data) return <Loading label="Loading activity…" />;
-  if (data.timeline.length === 0) return <Card className="border-dashed"><CardContent className="flex flex-col items-center justify-center gap-3 py-12"><div className="flex size-12 items-center justify-center rounded-full bg-emerald-500/10"><Activity className="size-6 text-emerald-600" /></div><div className="text-center"><p className="text-sm font-medium">No activity yet</p><p className="mt-1 text-xs text-muted-foreground">Run a workflow to see activity here.</p></div></CardContent></Card>;
+  if (timeline.length === 0) return <Card className="border-dashed"><CardContent className="flex flex-col items-center justify-center gap-3 py-12"><div className="flex size-12 items-center justify-center rounded-full bg-emerald-500/10"><Activity className="size-6 text-emerald-600" /></div><div className="text-center"><p className="text-sm font-medium">No activity yet</p><p className="mt-1 text-xs text-muted-foreground">Run a workflow to see activity here.</p></div></CardContent></Card>;
 
   return (
     <Card>
@@ -39,7 +39,7 @@ export function ActivityTimeline({ projectId, onOpenRun }: { projectId: string; 
           <CardTitle className="flex items-center gap-2 text-base"><Activity className="size-4 text-emerald-600" />Activity Timeline</CardTitle>
           <div className="flex items-center gap-1.5">
             {(["all", "success", "failed", "agent"] as const).map(f => {
-              const count = f === "all" ? data.timeline.length : f === "agent" ? data.timeline.filter(t => t.trigger === "auto").length : data.timeline.filter(t => t.status === f).length;
+              const count = f === "all" ? timeline.length : f === "agent" ? timeline.filter(t => t.trigger === "auto").length : timeline.filter(t => t.status === f).length;
               if (count === 0 && f !== "all") return null;
               return <button key={f} type="button" onClick={() => setFilter(f)} className={cn("inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium transition-colors", filter === f ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : "border-border text-muted-foreground hover:bg-accent")}>{f === "all" ? "All" : f === "agent" ? "Agent" : f}<span className="tabular-nums opacity-60">{count}</span></button>;
             })}
