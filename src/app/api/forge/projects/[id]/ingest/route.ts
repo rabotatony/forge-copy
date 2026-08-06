@@ -103,7 +103,12 @@ def flush_batch():
     print("batch:", sent, "/", len(entries), "ok:", r.get("ok"), flush=True)
     batch, batch_bytes = [], 0
 
+skipped = []
 for p, d in entries:
+    if len(d) > 35000000:
+        skipped.append(p)
+        print("SKIPPED oversized:", p, len(d), flush=True)
+        continue
     b64 = base64.b64encode(d).decode()
     if len(batch) >= 25 or batch_bytes + len(b64) > 4000000:
         flush_batch()
