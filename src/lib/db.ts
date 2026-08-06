@@ -41,7 +41,10 @@ function createPrismaClient(): PrismaClient {
       // older getRequestContext no longer exists). Sync form is fine here:
       // we only read the stable env.DB binding during request handling.
       const ctx = getCloudflareContext();
-      const adapter = new PrismaD1((ctx.env as Record<string, unknown>).DB);
+      // Wrap the binding with the SQL guard: Prisma's query compiler emits
+      // OFFSET shapes that strict D1 rejects (see d1-guard.ts).
+      const { guardD1 } = require("@/lib/forge/d1-guard") as { guardD1: <X>(x: X) => X };
+      const adapter = new PrismaD1(guardD1((ctx.env as Record<string, unknown>).DB));
       return new PrismaClient({ adapter, log: ["error"] });
     } catch {
       // D1 unavailable — fall back to default client (SQLite).
