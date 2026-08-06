@@ -26,8 +26,10 @@ function isWorkers(): boolean {
 // Lazily get the R2 bucket binding (Workers only).
 function getR2(): any {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { getRequestContext } = require('@opennextjs/cloudflare');
-  const ctx = getRequestContext();
+  const { getCloudflareContext } = require('@opennextjs/cloudflare');
+  // Note: installed @opennextjs/cloudflare exports getCloudflareContext
+  // (the older getRequestContext no longer exists).
+  const ctx = getCloudflareContext();
   return (ctx.env as Record<string, unknown>).STORAGE;
 }
 
