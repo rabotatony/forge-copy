@@ -79,12 +79,12 @@ function CapabilityCard({ title, icon, cap }: { title: string; icon: React.React
           <XCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" /> {b}
         </p>
       ))}
-      {cap.warnings.map((w, i) => (
+      {(cap.warnings ?? []).map((w, i) => (
         <p key={`w${i}`} className="text-xs text-amber-600/90 dark:text-amber-400/90 flex gap-1.5">
           <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" /> {w}
         </p>
       ))}
-      {cap.ok && cap.warnings.length === 0 && (
+      {cap.ok && (cap.warnings ?? []).length === 0 && (
         <p className="text-xs text-zinc-500 dark:text-zinc-400">No blockers, no warnings.</p>
       )}
     </div>
@@ -190,11 +190,11 @@ export function BuildIntelligencePanel({ projectId }: { projectId: string }) {
         <CapabilityCard title="SSR / server" icon={<Boxes className="h-4 w-4 text-violet-500" />} cap={analysis.capabilities.ssr} />
       </div>
 
-      {analysis.recommendedTargets.length > 0 && (
+      {(analysis.recommendedTargets ?? []).length > 0 && (
         <div className="text-xs space-y-1.5">
           <p className="font-medium text-zinc-600 dark:text-zinc-300">Recommended targets</p>
           <div className="flex flex-wrap gap-1.5">
-            {analysis.recommendedTargets.map(t => (
+            {(analysis.recommendedTargets ?? []).map(t => (
               <span key={t} className="rounded-md border border-emerald-300 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 px-2 py-0.5">
                 {TARGET_LABELS[t] ?? t}
               </span>
