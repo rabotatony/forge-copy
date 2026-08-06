@@ -1,7 +1,5 @@
-// TEMPORARY diagnostic — isolates which primitive fails on Workers.
+// TEMPORARY diagnostic v2 — pinpoints which D1-adapter step fails on Workers.
 import type { NextRequest } from "next/server";
-import { db } from "@/lib/db";
-import * as nodeCrypto from "node:crypto";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -10,32 +8,61 @@ export async function GET(request: NextRequest): Promise<Response> {
   const id = request.nextUrl.searchParams.get("id") ?? "testproj_zip1";
   const out: Record<string, string> = {};
 
+  // 1. require adapter-d1
+  let PrismaD1: any = null;
   try {
-    const rows = await db.project.findMany({ take: 1 });
-    out.findMany = `ok (${rows.length})`;
-  } catch (e) { out.findMany = `ERR ${e instanceof Error ? e.message : e}`; }
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const mod = require("@prisma/adapter-d1");
+    PrismaD1 = mod.PrismaD1;
+    out.adapterRequire = `ok (PrismaD1=${typeof PrismaD1}, keys=${Object.keys(mod).slice(0, 6).join("|")})`;
+  } catch (e) { out.adapterRequire = `ERR ${e instanceof Error ? e.message : e}`; }
 
+  // 2. require @opennextjs/cloudflare
+  let getRequestContext: any = null;
   try {
-    const row = await db.project.findUnique({ where: { id } });
-    out.findUnique = row ? `ok (${row.name})` : "ok (null)";
-  } catch (e) { out.findUnique = `ERR ${e instanceof Error ? e.message : e}`; }
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const mod = require("@opennextjs/cloudflare");
+    getRequestContext = mod.getRequestContext;
+    out.opennextRequire = `ok (getRequestContext=${typeof getRequestContext}, keys=${Object.keys(mod).slice(0, 8).join("|")})`;
+  } catch (e) { out.opennextRequire = `ERR ${e instanceof Error ? e.message : e}`; }
 
-  try {
-    const h = nodeCrypto.createHmac("sha256", "k").update(id).digest("hex");
-    out.nodeCryptoHmac = `ok ${h.slice(0, 12)}`;
-  } catch (e) { out.nodeCryptoHmac = `ERR ${e instanceof Error ? e.message : e}`; }
+  // 3. request context + DB binding
+  let DB: any = null;
+  if (getRequestContext) {
+    try {
+      const ctx = getRequestContext();
+      DB = (ctx.env as Record<string, unknown>).DB;
+      out.reqContext = `ok (DB=${typeof DB})`;
+    } catch (e) { out.reqContext = `ERR ${e instanceof Error ? e.message : e}`; }
+  }
 
-  try {
-    const key = await crypto.subtle.importKey(
-      "raw", new TextEncoder().encode("k"),
-      { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-    const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(id));
-    out.webCryptoHmac = `ok ${sig.byteLength}b`;
-  } catch (e) { out.webCryptoHmac = `ERR ${e instanceof Error ? e.message : e}`; }
+  // 4. construct adapter
+  let adapter: any = null;
+  if (PrismaD1 && DB) {
+    try {
+      adapter = new PrismaD1(DB);
+      out.adapterNew = "ok";
+    } catch (e) { out.adapterNew = `ERR ${e instanceof Error ? e.message : e}`; }
+  }
 
-  try {
-    out.origin = new URL(request.url).origin;
-  } catch (e) { out.origin = `ERR ${e instanceof Error ? e.message : e}`; }
+  // 5. PrismaClient with adapter
+  if (adapter) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { PrismaClient } = require("@prisma/client");
+      const client = new PrismaClient({ adapter });
+      out.clientNew = "ok";
+      // 6. model query
+      try {
+        const rows = await client.project.findMany({ take: 1 });
+        out.findMany = `ok (${rows.length} rows)`;
+      } catch (e) { out.findMany = `ERR ${e instanceof Error ? e.message.slice(0, 180) : e}`; }
+      try {
+        const row = await client.project.findUnique({ where: { id } });
+        out.findUnique = row ? `ok (${row.name})` : "ok (null)";
+      } catch (e) { out.findUnique = `ERR ${e instanceof Error ? e.message.slice(0, 180) : e}`; }
+    } catch (e) { out.clientNew = `ERR ${e instanceof Error ? e.message.slice(0, 180) : e}`; }
+  }
 
   return Response.json(out);
 }
