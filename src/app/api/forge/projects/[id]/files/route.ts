@@ -1,98 +1,94 @@
 // ============================================================
-// Forge — file tree of an extracted project
+// Forge — batch file ingestion (runner -> Forge)
 // ============================================================
-import type { NextRequest } from 'next/server';
-import * as fs from 'node:fs';
-import * as path from 'node:path';
-import { db } from '@/lib/db';
+// POST /api/forge/projects/{id}/files
+// Header: x-forge-token: <signed source token for this project>
+// Body:
+//   { files: [{ path, b64 }] }                 — one batch of files
+//   { done: true, paths: [...], keyFiles: {...}, fileSize? }
+//                                              — finalize: detection
+//                                                + row update
+// Designed for the free plan: each call is small (<= ~8 MB body).
+// ============================================================
+import type { NextRequest } from "next/server";
+import path from "node:path";
+import { db } from "@/lib/db";
+import { ok, fail, serverError } from "@/lib/forge/response";
+import { writeStorageFile } from "@/lib/forge/storage-io";
+import { extractDir } from "@/lib/forge/storage";
+import { verifySourceToken } from "@/lib/forge/gha-build";
+import { detectFromManifest } from "@/lib/forge/project-detect";
 
-export const dynamic = 'force-dynamic';
-export const runtime = 'nodejs';
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 
-const SKIP_DIRS = new Set([
-  'node_modules', '.git', 'dist', 'build', '.next', 'target',
-  '.cache', 'coverage', '__pycache__', '.venv', 'venv',
-]);
-const MAX_ENTRIES = 500;
+const MAX_BATCH_FILES = 250;
+const MAX_BATCH_BYTES = 12 * 1024 * 1024; // decoded bytes
 
-interface TreeNode {
-  type: 'dir' | 'file';
-  path: string;
-  size: number;
-  childrenCount: number;
+function safePath(p: string): string | null {
+  if (typeof p !== "string") return null;
+  const norm = p.replace(/\\\\/g, "/").replace(/^\\/+/, "");
+  if (!norm || norm.includes("..") || path.isAbsolute(norm)) return null;
+  return norm;
 }
 
-export async function GET(
-  _request: NextRequest,
+export async function POST(
+  request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ): Promise<Response> {
   try {
     const { id } = await params;
+    const token = request.headers.get("x-forge-token") ?? "";
+    const tokenProject = await verifySourceToken(token);
+    if (tokenProject !== id) return fail("bad token", 401);
+
     const project = await db.project.findUnique({ where: { id } });
-    if (!project) {
-      return Response.json({ error: 'Project not found' }, { status: 404 });
-    }
+    if (!project) return fail("project not found");
 
-    const root = project.extractedPath;
-    if (!root || !fs.existsSync(root)) {
-      return Response.json({ tree: [], totalFiles: 0, truncated: false });
-    }
-
-    const tree: TreeNode[] = [];
-    let totalFiles = 0;
-    let truncated = false;
-
-    const visit = (dir: string): void => {
-      if (truncated) return;
-      let entries: fs.Dirent[];
-      try {
-        entries = fs.readdirSync(dir, { withFileTypes: true });
-      } catch {
-        return;
-      }
-      // Sort: directories first, then files, alphabetical.
-      entries.sort((a, b) => {
-        if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1;
-        return a.name.localeCompare(b.name);
-      });
-      for (const e of entries) {
-        if (e.isDirectory() && SKIP_DIRS.has(e.name)) continue;
-        const full = path.join(dir, e.name);
-        const rel = path.relative(root, full).split(path.sep).join('/');
-        let size = 0;
-        let childrenCount = 0;
-        try {
-          if (e.isFile()) {
-            size = fs.statSync(full).size;
-            totalFiles++;
-          } else if (e.isDirectory()) {
-            // Count direct children for context.
-            childrenCount = fs.readdirSync(full).length;
-          }
-        } catch { /* ignore */ }
-
-        if (tree.length >= MAX_ENTRIES) {
-          truncated = true;
-          return;
-        }
-        tree.push({
-          type: e.isDirectory() ? 'dir' : 'file',
-          path: rel,
-          size,
-          childrenCount,
-        });
-
-        if (e.isDirectory()) visit(full);
-      }
+    const body = (await request.json().catch(() => ({}))) as {
+      files?: Array<{ path: string; b64: string }>;
+      done?: boolean;
+      paths?: string[];
+      keyFiles?: Record<string, string>;
+      fileSize?: number;
     };
 
-    visit(root);
+    // ---- batch of files ----
+    if (Array.isArray(body.files) && body.files.length > 0) {
+      if (body.files.length > MAX_BATCH_FILES) return fail(`batch too large (> ${MAX_BATCH_FILES} files)`);
+      const baseDir = extractDir(id);
+      let bytes = 0;
+      for (const f of body.files) {
+        const rel = safePath(f.path);
+        if (!rel) return fail(`unsafe path: ${String(f.path).slice(0, 80)}`);
+        const data = Buffer.from(f.b64 ?? "", "base64");
+        bytes += data.length;
+        if (bytes > MAX_BATCH_BYTES) return fail("batch too large (> 12 MB decoded)");
+        await writeStorageFile(path.posix.join(baseDir, rel), data);
+      }
+      return ok({ received: body.files.length });
+    }
 
-    return Response.json({ tree, totalFiles, truncated });
-  } catch (err) {
-    return Response.json(
-      { error: err instanceof Error ? err.message : String(err) },
-      { status: 500 },
-    );
+    // ---- finalize ----
+    if (body.done) {
+      const paths = Array.isArray(body.paths) ? body.paths.map(safePath).filter((p): p is string => !!p) : [];
+      const keyFiles = body.keyFiles && typeof body.keyFiles === "object" ? body.keyFiles : {};
+      const { kind, detection } = detectFromManifest(paths, keyFiles);
+      await db.project.update({
+        where: { id },
+        data: {
+          extractedPath: extractDir(id),
+          fileCount: paths.length,
+          kind,
+          detection: JSON.stringify(detection),
+          ...(typeof body.fileSize === "number" ? { fileSize: body.fileSize } : {}),
+        },
+      });
+      return ok({ finalized: true, fileCount: paths.length, kind, framework: detection.framework ?? null });
+    }
+
+    return fail("send { files: [...] } or { done: true, paths, keyFiles }");
+  } catch (e) {
+    return serverError(e);
   }
 }
