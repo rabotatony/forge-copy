@@ -18,20 +18,43 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 const PY_SCRIPT = String.raw`
-import json, base64, io, os, tarfile, urllib.request, zipfile
+import json, base64, io, os, subprocess, sys, tarfile, time, urllib.request, zipfile
 
 SRC = os.environ["SRC_URL"]
 PID = os.environ["PROJECT_ID"]
 TOKEN = os.environ["INGEST_TOKEN"]
 BASE = "https://forge.rabotatony.workers.dev/api/forge/projects/" + PID + "/files"
 
-def post(payload):
-    req = urllib.request.Request(
-        BASE, data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json", "x-forge-token": TOKEN},
-        method="POST")
-    with urllib.request.urlopen(req, timeout=180) as r:
-        return json.loads(r.read())
+def post(payload, attempt=0):
+    with open("/tmp/batch.json", "w") as f:
+        json.dump(payload, f)
+    p = subprocess.run(
+        ["curl", "-sS", "-m", "240", "-X", "POST", BASE,
+         "-H", "Content-Type: application/json",
+         "-H", "x-forge-token: " + TOKEN,
+         "--data-binary", "@/tmp/batch.json",
+         "-w", "
+HTTPCODE:%{http_code}"],
+        capture_output=True, text=True)
+    out = p.stdout or ""
+    code, body = 0, out + (p.stderr or "")
+    if "HTTPCODE:" in out:
+        body, code_s = out.rsplit("HTTPCODE:", 1)
+        try:
+            code = int(code_s.strip())
+        except Exception:
+            code = 0
+    if code == 200:
+        try:
+            return json.loads(body)
+        except Exception:
+            return {"ok": True}
+    print("POST FAILED code:", code, "attempt:", attempt, flush=True)
+    print("response-body:", body[:700], flush=True)
+    if attempt < 3:
+        time.sleep(4 * (attempt + 1))
+        return post(payload, attempt + 1)
+    raise SystemExit("batch failed with HTTP %s" % code)
 
 print("downloading", SRC, flush=True)
 data = urllib.request.urlopen(SRC, timeout=600).read()
@@ -69,19 +92,22 @@ print("files:", len(entries), flush=True)
 
 batch, batch_bytes = [], 0
 sent = 0
-for p, d in entries:
-    b64 = base64.b64encode(d).decode()
-    if len(batch) >= 40 or batch_bytes + len(b64) > 6000000:
-        r = post({"files": batch})
-        sent += len(batch)
-        print("batch:", sent, "ok:", r.get("ok"), flush=True)
-        batch, batch_bytes = [], 0
-    batch.append({"path": p, "b64": b64})
-    batch_bytes += len(b64)
-if batch:
+def flush_batch():
+    global batch, batch_bytes, sent
+    if not batch:
+        return
     r = post({"files": batch})
     sent += len(batch)
-    print("batch:", sent, "ok:", r.get("ok"), flush=True)
+    print("batch:", sent, "/", len(entries), "ok:", r.get("ok"), flush=True)
+    batch, batch_bytes = [], 0
+
+for p, d in entries:
+    b64 = base64.b64encode(d).decode()
+    if len(batch) >= 25 or batch_bytes + len(b64) > 4000000:
+        flush_batch()
+    batch.append({"path": p, "b64": b64})
+    batch_bytes += len(b64)
+flush_batch()
 
 def text_of(p):
     for pp, d in entries:
