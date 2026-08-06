@@ -61,12 +61,12 @@ export function OnboardingPanel({ projectId, onRunWorkflow, onDismiss }: { proje
         <div className="grid grid-cols-3 gap-2 text-center">
           <StatBox value={profile.sourceFileCount} label="source files" />
           <StatBox value={profile.dependencyCount} label="dependencies" />
-          <StatBox value={profile.warnings.length} label="warnings" />
+          <StatBox value={(profile.warnings ?? []).length} label="warnings" />
         </div>
-        {(profile.strengths.length > 0 || profile.warnings.length > 0) && (
+        {((profile.strengths ?? []).length > 0 || (profile.warnings ?? []).length > 0) && (
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-            {profile.strengths.length > 0 && <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-3"><h4 className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-emerald-700 dark:text-emerald-300"><CheckCircle2 className="size-3.5" />Strengths ({profile.strengths.length})</h4><ul className="space-y-1">{profile.strengths.slice(0, 5).map((s, i) => <li key={i} className="text-xs text-muted-foreground">{s}</li>)}</ul></div>}
-            {profile.warnings.length > 0 && <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3"><h4 className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-amber-700 dark:text-amber-300"><AlertTriangle className="size-3.5" />Needs attention ({profile.warnings.length})</h4><ul className="space-y-1">{profile.warnings.slice(0, 5).map((w, i) => <li key={i} className="text-xs text-muted-foreground">{w}</li>)}</ul></div>}
+            {(profile.strengths ?? []).length > 0 && <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-3"><h4 className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-emerald-700 dark:text-emerald-300"><CheckCircle2 className="size-3.5" />Strengths ({(profile.strengths ?? []).length})</h4><ul className="space-y-1">{(profile.strengths ?? []).slice(0, 5).map((s, i) => <li key={i} className="text-xs text-muted-foreground">{s}</li>)}</ul></div>}
+            {(profile.warnings ?? []).length > 0 && <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3"><h4 className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-amber-700 dark:text-amber-300"><AlertTriangle className="size-3.5" />Needs attention ({(profile.warnings ?? []).length})</h4><ul className="space-y-1">{(profile.warnings ?? []).slice(0, 5).map((w, i) => <li key={i} className="text-xs text-muted-foreground">{w}</li>)}</ul></div>}
           </div>
         )}
         <div className="space-y-1.5">
