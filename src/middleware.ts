@@ -211,9 +211,7 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   }
 
   // ---- 2. Auth enforcement (forge API only) ----
-  const authDisabled = request.headers.get('x-forge-auth-disabled') === '1'; // never trusted; real switch below
-  const envDisabled = false; // set via FORGE_AUTH_DISABLED at build/runtime where readable
-  if (!pathname.startsWith('/api/forge/') || envDisabled || authDisabled) {
+  if (!pathname.startsWith('/api/forge/')) {
     const response = NextResponse.next();
     response.headers.set('x-ratelimit-limit', String(limit));
     return response;
@@ -253,7 +251,7 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   }
   if (verdict.projectId) {
     const m = pathname.match(/^\/api\/forge\/projects\/([^/]+)/);
-    if (!m || m[1] !== verdict.projectId) {
+    if (m && m[1] !== verdict.projectId) {
       return NextResponse.json({ error: 'Token is scoped to a different project' }, { status: 403 });
     }
   }
