@@ -23,7 +23,7 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 const MAX_BATCH_FILES = 250;
-const MAX_BATCH_BYTES = 12 * 1024 * 1024; // decoded bytes
+const MAX_BATCH_BYTES = 40 * 1024 * 1024; // decoded bytes (single large assets pass as 1-file batches)
 
 function safePath(p: string): string | null {
   if (typeof p !== "string") return null;
@@ -106,7 +106,7 @@ export async function POST(
         if (!rel) return fail(`unsafe path: ${String(f.path).slice(0, 80)}`);
         const data = Buffer.from(f.b64 ?? "", "base64");
         bytes += data.length;
-        if (bytes > MAX_BATCH_BYTES) return fail("batch too large (> 12 MB decoded)");
+        if (bytes > MAX_BATCH_BYTES) return fail("batch too large (> 40 MB decoded)");
         await writeStorageFile(path.posix.join(baseDir, rel), data);
       }
       return ok({ received: body.files.length });
