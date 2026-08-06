@@ -178,7 +178,7 @@ export function CloudBuildTab({ projectId }: { projectId: string }) {
             <div className="flex flex-wrap items-center gap-2">
               <StatusPill status={status.status} conclusion={status.conclusion} />
               <span className="text-[11px] text-muted-foreground">
-                run #{status.id} · started {new Date(status.createdAt).toLocaleTimeString()}
+                run #{status.id} · started {status.createdAt ? new Date(status.createdAt).toLocaleTimeString() : ""}
               </span>
               {status.htmlUrl && (
                 <a
@@ -193,9 +193,9 @@ export function CloudBuildTab({ projectId }: { projectId: string }) {
               )}
             </div>
 
-            {status.jobs.length > 0 && (
+            {(status.jobs ?? []).length > 0 && (
               <div className="flex flex-wrap gap-1.5">
-                {status.jobs.map((job) => (
+                {(status.jobs ?? []).map((job) => (
                   <span key={job.id} className="rounded border border-border bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
                     {job.name}: {job.status === "completed" ? (job.conclusion ?? "done") : job.status}
                   </span>
