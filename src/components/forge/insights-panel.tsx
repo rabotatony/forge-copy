@@ -68,10 +68,10 @@ export function InsightsPanel({ projectId, onRunStarted }: { projectId: string; 
   if (isLoading) return <Card><CardContent className="flex items-center justify-center py-12"><Loader2 className="mr-2 size-5 animate-spin text-emerald-600" /><span className="text-sm text-muted-foreground">Analyzing project…</span></CardContent></Card>;
   if (isError || !data) return <Card><CardContent className="py-8 text-center text-sm text-red-600 dark:text-red-400">Failed to analyze project: {error?.message}</CardContent></Card>;
 
-  const criticalCount = data.insights.filter(i => i.priority === "critical").length;
-  const highCount = data.insights.filter(i => i.priority === "high").length;
-  const visibleInsights = expanded ? data.insights : data.insights.slice(0, 4);
-  const hiddenCount = data.insights.length - 4;
+  const criticalCount = (data.insights ?? []).filter(i => i.priority === "critical").length;
+  const highCount = (data.insights ?? []).filter(i => i.priority === "high").length;
+  const visibleInsights = expanded ? data.insights : (data.insights ?? []).slice(0, 4);
+  const hiddenCount = (data.insights ?? []).length - 4;
 
   return (
     <div className="space-y-4">
@@ -80,7 +80,7 @@ export function InsightsPanel({ projectId, onRunStarted }: { projectId: string; 
           <div className="flex items-center justify-between">
             <div>
               <CardTitle className="flex items-center gap-2 text-base"><Gauge className="size-4 text-emerald-600" />Project Health</CardTitle>
-              <CardDescription>Deep analysis with {data.insights.length} actionable recommendations</CardDescription>
+              <CardDescription>Deep analysis with {(data.insights ?? []).length} actionable recommendations</CardDescription>
             </div>
             <HealthScoreBadge score={data.healthScore} />
           </div>
