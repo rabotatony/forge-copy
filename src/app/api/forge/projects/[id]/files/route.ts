@@ -27,7 +27,7 @@ const MAX_BATCH_BYTES = 12 * 1024 * 1024; // decoded bytes
 
 function safePath(p: string): string | null {
   if (typeof p !== "string") return null;
-  const norm = p.replace(/\\\\/g, "/").replace(/^\\/+/, "");
+  const norm = p.replace(/\\/g, "/").replace(/^[/]+/, "");
   if (!norm || norm.includes("..") || path.isAbsolute(norm)) return null;
   return norm;
 }
