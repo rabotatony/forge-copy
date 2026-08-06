@@ -49,7 +49,25 @@ export async function POST(
       await new Promise((r) => setTimeout(r, 250));
       project = await db.project.findUnique({ where: { id } });
     }
-    if (!project) return fail("project not found", 404);
+    if (!project) {
+      // Diagnostic: what does the raw layer see in THIS route's context?
+      let rawCheck: unknown = null;
+      try {
+        rawCheck = await db.$queryRaw`SELECT id, name FROM Project LIMIT 5`;
+      } catch (e) {
+        rawCheck = `ERR ${e instanceof Error ? e.message.slice(0, 150) : e}`;
+      }
+      let countCheck: unknown = null;
+      try {
+        countCheck = await db.project.count();
+      } catch (e) {
+        countCheck = `ERR ${e instanceof Error ? e.message.slice(0, 150) : e}`;
+      }
+      return fail(
+        `project not found (id=${id}; tokenProject=${tokenProject}; raw=${JSON.stringify(rawCheck).slice(0, 300)}; count=${JSON.stringify(countCheck)})`,
+        404,
+      );
+    }
 
     const body = (await request.json().catch(() => ({}))) as {
       files?: Array<{ path: string; b64: string }>;
