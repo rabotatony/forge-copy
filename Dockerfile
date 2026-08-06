@@ -38,6 +38,12 @@ RUN bun install --frozen-lockfile || bun install
 COPY prisma ./prisma
 RUN bunx prisma generate
 
+# Build-time placeholder so Next page-data collection passes the
+# explicit-encryption-key check; the entrypoint generates a real key
+# at runtime (persisted to /data) if none is provided.
+ARG FORGE_ENCRYPTION_KEY=buildplaceholder0000000000000000
+ENV FORGE_ENCRYPTION_KEY=$FORGE_ENCRYPTION_KEY
+
 # Source + build (.next/standalone/server.js)
 COPY . .
 RUN bun run build
