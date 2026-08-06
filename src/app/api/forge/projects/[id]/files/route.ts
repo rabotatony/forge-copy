@@ -4,11 +4,11 @@
 // POST /api/forge/projects/{id}/files
 // Header: x-forge-token: <signed source token for this project>
 // Body:
-//   { files: [{ path, b64 }] }                 — one batch of files
+//   { files: [{ path, b64 }] }   — one batch of files (<= 250 files,
+//                                  <= 40 MB decoded)
 //   { done: true, paths: [...], keyFiles: {...}, fileSize? }
-//                                              — finalize: detection
-//                                                + row update
-// Designed for the free plan: each call is small (<= ~8 MB body).
+//                                — finalize: detection + row update
+// Designed for the free plan: each call is small.
 // ============================================================
 import type { NextRequest } from "next/server";
 import path from "node:path";
@@ -23,7 +23,7 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 const MAX_BATCH_FILES = 250;
-const MAX_BATCH_BYTES = 40 * 1024 * 1024; // decoded bytes (single large assets pass as 1-file batches)
+const MAX_BATCH_BYTES = 40 * 1024 * 1024; // decoded bytes
 
 function safePath(p: string): string | null {
   if (typeof p !== "string") return null;
@@ -49,41 +49,7 @@ export async function POST(
       await new Promise((r) => setTimeout(r, 250));
       project = await db.project.findUnique({ where: { id } });
     }
-    if (!project) {
-      return fail("project not found", 404);
-    } catch (e) {
-        rawCheck = `ERR ${e instanceof Error ? e.message.slice(0, 150) : e}`;
-      }
-      let ctxCheck: unknown = null;
-      let directD1: unknown = null;
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { getCloudflareContext } = require("@opennextjs/cloudflare");
-        const ctx = getCloudflareContext();
-        const DB = (ctx.env as Record<string, unknown>).DB as
-          | { prepare: (s: string) => { all: () => Promise<unknown> } }
-          | undefined;
-        ctxCheck = DB ? "DB binding present" : "NO DB binding";
-        if (DB) {
-          const res = (await DB.prepare("SELECT COUNT(*) AS n FROM Project").all()) as {
-            results?: Array<{ n: number }>;
-          };
-          directD1 = res?.results ?? res;
-        }
-      } catch (e) {
-        ctxCheck = `CTX ERR ${e instanceof Error ? e.message.slice(0, 120) : e}`;
-      }
-      let countCheck: unknown = null;
-      try {
-        countCheck = await db.project.count();
-      } catch (e) {
-        countCheck = `ERR ${e instanceof Error ? e.message.slice(0, 150) : e}`;
-      }
-      return fail(
-        `project not found (id=${id}; raw=${JSON.stringify(rawCheck).slice(0, 150)}; count=${JSON.stringify(countCheck)}; ctx=${JSON.stringify(ctxCheck)}; directD1=${JSON.stringify(directD1).slice(0, 150)})`,
-        404,
-      );
-    }
+    if (!project) return fail("project not found", 404);
 
     const body = (await request.json().catch(() => ({}))) as {
       files?: Array<{ path: string; b64: string }>;
@@ -111,7 +77,9 @@ export async function POST(
 
     // ---- finalize ----
     if (body.done) {
-      const paths = Array.isArray(body.paths) ? body.paths.map(safePath).filter((p): p is string => !!p) : [];
+      const paths = Array.isArray(body.paths)
+        ? body.paths.map(safePath).filter((p): p is string => !!p)
+        : [];
       const keyFiles = body.keyFiles && typeof body.keyFiles === "object" ? body.keyFiles : {};
       const { kind, detection } = detectFromManifest(paths, keyFiles);
       await db.project.update({
