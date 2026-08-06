@@ -7,7 +7,10 @@
 // Dispatches forge-remote-build.yml on a FREE GitHub runner:
 //   runner downloads the archive -> extracts in memory ->
 //   POSTs files back in small batches (/files) -> finalizes.
-// Zero local compute: the worker only signs tokens + dispatches.
+//
+// The python script travels as BASE64 — immune to every escaping
+// layer between here and the runner (JSON -> workflow input ->
+// YAML rendering -> bash). No \n, no quotes, no surprises.
 // ============================================================
 import type { NextRequest } from "next/server";
 import { db } from "@/lib/db";
@@ -17,7 +20,7 @@ import { signSourceToken } from "@/lib/forge/gha-build";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-const PY_SCRIPT = String.raw`
+const PY_SCRIPT = `
 import json, base64, io, os, subprocess, sys, tarfile, time, urllib.request, zipfile
 
 SRC = os.environ["SRC_URL"]
@@ -33,8 +36,7 @@ def post(payload, attempt=0):
          "-H", "Content-Type: application/json",
          "-H", "x-forge-token: " + TOKEN,
          "--data-binary", "@/tmp/batch.json",
-         "-w", "
-HTTPCODE:%{http_code}"],
+         "-w", " HTTPCODE:%{http_code}"],
         capture_output=True, text=True)
     out = p.stdout or ""
     code, body = 0, out + (p.stderr or "")
@@ -157,11 +159,14 @@ export async function POST(
     const repo = process.env.FORGE_GHA_REPO || "rabotatony/forge-copy";
 
     const ingestToken = await signSourceToken(id);
+    // base64 the whole script: zero escaping issues across JSON/YAML/bash
+    const scriptB64 = Buffer.from(PY_SCRIPT, "utf8").toString("base64");
     const buildCmd =
-      `export SRC_URL=${JSON.stringify(sourceUrl)}\n` +
-      `export PROJECT_ID=${JSON.stringify(id)}\n` +
-      `export INGEST_TOKEN=${JSON.stringify(ingestToken)}\n` +
-      `python3 - <<'PYEOF'${PY_SCRIPT}\nPYEOF`;
+      `export SRC_URL=${JSON.stringify(sourceUrl)} && ` +
+      `export PROJECT_ID=${JSON.stringify(id)} && ` +
+      `export INGEST_TOKEN=${JSON.stringify(ingestToken)} && ` +
+      `echo ${scriptB64} | base64 -d > /tmp/forge_ingest.py && ` +
+      `python3 /tmp/forge_ingest.py`;
 
     const res = await fetch(`https://api.github.com/repos/${repo}/actions/workflows/forge-remote-build.yml/dispatches`, {
       method: "POST",
