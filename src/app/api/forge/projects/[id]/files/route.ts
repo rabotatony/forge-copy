@@ -42,8 +42,14 @@ export async function POST(
     const tokenProject = await verifySourceToken(token);
     if (tokenProject !== id) return fail("bad token", 401);
 
-    const project = await db.project.findUnique({ where: { id } });
-    if (!project) return fail("project not found");
+    // Resilient lookup: findUnique -> findFirst -> short retry.
+    let project = await db.project.findUnique({ where: { id } });
+    if (!project) project = await db.project.findFirst({ where: { id } });
+    if (!project) {
+      await new Promise((r) => setTimeout(r, 250));
+      project = await db.project.findUnique({ where: { id } });
+    }
+    if (!project) return fail("project not found", 404);
 
     const body = (await request.json().catch(() => ({}))) as {
       files?: Array<{ path: string; b64: string }>;
