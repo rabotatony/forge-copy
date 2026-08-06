@@ -57,6 +57,25 @@ export async function POST(
       } catch (e) {
         rawCheck = `ERR ${e instanceof Error ? e.message.slice(0, 150) : e}`;
       }
+      let ctxCheck: unknown = null;
+      let directD1: unknown = null;
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { getCloudflareContext } = require("@opennextjs/cloudflare");
+        const ctx = getCloudflareContext();
+        const DB = (ctx.env as Record<string, unknown>).DB as
+          | { prepare: (s: string) => { all: () => Promise<unknown> } }
+          | undefined;
+        ctxCheck = DB ? "DB binding present" : "NO DB binding";
+        if (DB) {
+          const res = (await DB.prepare("SELECT COUNT(*) AS n FROM Project").all()) as {
+            results?: Array<{ n: number }>;
+          };
+          directD1 = res?.results ?? res;
+        }
+      } catch (e) {
+        ctxCheck = `CTX ERR ${e instanceof Error ? e.message.slice(0, 120) : e}`;
+      }
       let countCheck: unknown = null;
       try {
         countCheck = await db.project.count();
@@ -64,7 +83,7 @@ export async function POST(
         countCheck = `ERR ${e instanceof Error ? e.message.slice(0, 150) : e}`;
       }
       return fail(
-        `project not found (id=${id}; tokenProject=${tokenProject}; raw=${JSON.stringify(rawCheck).slice(0, 300)}; count=${JSON.stringify(countCheck)})`,
+        `project not found (id=${id}; raw=${JSON.stringify(rawCheck).slice(0, 150)}; count=${JSON.stringify(countCheck)}; ctx=${JSON.stringify(ctxCheck)}; directD1=${JSON.stringify(directD1).slice(0, 150)})`,
         404,
       );
     }
