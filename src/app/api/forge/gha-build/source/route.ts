@@ -24,15 +24,20 @@ export async function GET(request: NextRequest): Promise<Response> {
     const projectId = await verifySourceToken(token);
     if (!projectId) return fail("bad or expired source token", 401);
 
-    const data = await readStorageFile(sourceZipPath(projectId));
+    let data = await readStorageFile(sourceZipPath(projectId));
+    let kind: "zip" | "tar.gz" = "zip";
     if (!data || data.length === 0) {
-      return fail("no uploaded source.zip for this project (git projects build via codeload)");
+      data = await readStorageFile(sourceZipPath(projectId).replace(/source\.zip$/, "source.tar.gz"));
+      kind = "tar.gz";
+    }
+    if (!data || data.length === 0) {
+      return fail("no uploaded source archive for this project (git projects build via codeload)");
     }
 
     return new Response(new Uint8Array(data), {
       headers: {
-        "Content-Type": "application/zip",
-        "Content-Disposition": `attachment; filename="${projectId}-source.zip"`,
+        "Content-Type": kind === "zip" ? "application/zip" : "application/gzip",
+        "Content-Disposition": `attachment; filename="${projectId}-source.${kind}"`,
         "Cache-Control": "no-store",
       },
     });

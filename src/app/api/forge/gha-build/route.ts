@@ -56,10 +56,10 @@ export async function POST(request: NextRequest): Promise<Response> {
         }`;
         sourceKind = "tar";
       } else {
-        // Uploaded ZIP — Forge itself serves the source to the runner.
+        // Uploaded archive — Forge itself serves the source to the runner.
         const token = await signSourceToken(project.id);
         sourceUrl = `${origin}/api/forge/gha-build/source?token=${encodeURIComponent(token)}`;
-        sourceKind = "zip";
+        sourceKind = (project.fileName ?? "").toLowerCase().endsWith(".zip") ? "zip" : "tar";
       }
     }
 
