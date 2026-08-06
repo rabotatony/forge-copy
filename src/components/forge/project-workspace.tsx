@@ -3,7 +3,7 @@
 import { useState, lazy, Suspense } from "react";
 import {
   ArrowLeft, FileArchive, Files, History, HardDrive, LayoutGrid,
-  Code2, Workflow, Settings, Download, Loader2, Check, Key, Webhook, Github,
+  Code2, Workflow, Settings, Download, Loader2, Check, Key, Webhook, Github, Cloud,
 } from "lucide-react";
 import {
   Card,
@@ -48,6 +48,7 @@ const CustomWorkflowsTab = lazy(() => import("./tabs/custom-workflows-tab").then
 const SecretsTab = lazy(() => import("./tabs/secrets-tab").then(m => ({ default: m.SecretsTab })));
 const EnvVarsEditor = lazy(() => import("./env-vars-editor").then(m => ({ default: m.EnvVarsEditor })));
 const GitHubTab = lazy(() => import("./tabs/github-tab").then(m => ({ default: m.GitHubTab })));
+const CloudBuildTab = lazy(() => import("./tabs/cloud-build-tab").then(m => ({ default: m.CloudBuildTab })));
 const CacheTab = lazy(() => import("./tabs/cache-tab").then(m => ({ default: m.CacheTab })));
 const TriggersTab = lazy(() => import("./tabs/triggers-tab").then(m => ({ default: m.TriggersTab })));
 const NotificationsTab = lazy(() => import("./tabs/notifications-tab").then(m => ({ default: m.NotificationsTab })));
@@ -159,7 +160,7 @@ export function ProjectWorkspace({
 
       {/* 4-tab workspace */}
       <Tabs value={tab} onValueChange={setTab}>
-        <TabsList className="grid w-full grid-cols-3 sm:grid-cols-5">
+        <TabsList className="grid w-full grid-cols-3 sm:grid-cols-6">
           <TabsTrigger value="overview" className="gap-1.5">
             <LayoutGrid className="size-3.5" />
             <span className="hidden sm:inline">Overview</span>
@@ -173,6 +174,7 @@ export function ProjectWorkspace({
             <span className="hidden sm:inline">Pipelines</span>
           </TabsTrigger>
           <TabsTrigger value="github" className="gap-1.5"><Github className="size-3.5"/><span className="hidden sm:inline">GitHub</span></TabsTrigger>
+          <TabsTrigger value="cloud" className="gap-1.5"><Cloud className="size-3.5"/><span className="hidden sm:inline">Cloud Build</span></TabsTrigger>
           <TabsTrigger value="configure" className="gap-1.5">
             <Settings className="size-3.5" />
             <span className="hidden sm:inline">Configure</span>
@@ -272,6 +274,7 @@ export function ProjectWorkspace({
 
         {/* ── Configure tab — how to configure (sub-grouped) ── */}
         <TabsContent value="github" className="mt-4"><Suspense fallback={<Loading label="Loading GitHub…"/>}><GitHubTab projectId={projectId} /></Suspense></TabsContent>
+        <TabsContent value="cloud" className="mt-4"><Suspense fallback={<Loading label="Loading cloud build…"/>}><CloudBuildTab projectId={projectId} /></Suspense></TabsContent>
         <TabsContent value="configure" className="mt-4">
           <Suspense fallback={<Loading label="Loading configuration…" />}>
             <ConfigureTabs projectId={projectId} />
