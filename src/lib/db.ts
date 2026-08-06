@@ -1,14 +1,16 @@
 // ============================================================
 // Forge — Prisma client (dual-mode)
 // ============================================================
-// Local / dev / VPS : SQLite via DATABASE_URL (unchanged behavior).
+// Local / dev / VPS : SQLite via DATABASE_URL.
 // Cloudflare Workers: D1 via @prisma/adapter-d1 + OpenNext request
-//                     context (env.DB binding from wrangler.jsonc).
+//                     context (env.DB binding, SQL-guarded).
 //
-// The client is created LAZILY (on first access) because on Workers
-// the D1 binding is only available during request handling, not at
-// module load. A lazy Proxy keeps the `db` export shape unchanged so
-// the rest of the codebase keeps working without edits.
+// ROBUST CACHING: on Workers we only cache a client once it is a
+// real D1-connected client. If construction falls back to the local
+// SQLite client (context not ready / threw), we DO NOT cache it, so
+// the next call retries and picks up the D1 binding once available.
+// This kills the intermittent "project not found" bug caused by a
+// broken local-SQLite client getting cached for the isolate.
 // ============================================================
 import { PrismaClient } from "@prisma/client";
 
@@ -29,43 +31,56 @@ function isCloudflareWorkers(): boolean {
   return false;
 }
 
-function createPrismaClient(): PrismaClient {
+type CreateResult = { client: PrismaClient; isD1: boolean };
+
+function createPrismaClient(): CreateResult {
   if (isCloudflareWorkers()) {
     try {
-      // Lazy require so local/dev never needs these packages installed.
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { PrismaD1 } = require("@prisma/adapter-d1");
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { getCloudflareContext } = require("@opennextjs/cloudflare");
-      // Installed @opennextjs/cloudflare exports getCloudflareContext (the
-      // older getRequestContext no longer exists). Sync form is fine here:
-      // we only read the stable env.DB binding during request handling.
-      const ctx = getCloudflareContext();
-      // Wrap the binding with the SQL guard: Prisma's query compiler emits
-      // OFFSET shapes that strict D1 rejects (see d1-guard.ts).
       const { guardD1 } = require("@/lib/forge/d1-guard") as { guardD1: <X>(x: X) => X };
-      const adapter = new PrismaD1(guardD1((ctx.env as Record<string, unknown>).DB));
-      return new PrismaClient({ adapter, log: ["error"] });
+      const ctx = getCloudflareContext();
+      const DB = (ctx.env as Record<string, unknown>).DB;
+      if (!DB) throw new Error("no DB binding");
+      const adapter = new PrismaD1(guardD1(DB));
+      return { client: new PrismaClient({ adapter, log: ["error"] }), isD1: true };
     } catch {
-      // D1 unavailable — fall back to default client (SQLite).
-      return new PrismaClient({ log: ["error"] });
+      // D1/context not ready — return a local client for THIS call only.
+      return { client: new PrismaClient({ log: ["error"] }), isD1: false };
     }
   }
-  return new PrismaClient({ log: ["error"] });
+  return { client: new PrismaClient({ log: ["error"] }), isD1: false };
 }
 
 let _db: PrismaClient | null = null;
+let _dbGood = false;
+
 function getDb(): PrismaClient {
-  if (_db) return _db;
-  if (globalForPrisma.prisma) {
-    _db = globalForPrisma.prisma;
-    return _db;
+  if (_db && _dbGood) return _db;
+
+  const { client, isD1 } = createPrismaClient();
+
+  if (isCloudflareWorkers()) {
+    if (isD1) {
+      _db = client;
+      _dbGood = true;
+    } else {
+      // Do NOT cache a broken (local-fallback) client — retry next call.
+      _db = null;
+      _dbGood = false;
+    }
+    return client;
   }
-  _db = createPrismaClient();
+
+  // Local / dev: cache normally.
+  _db = client;
+  _dbGood = true;
   if (process.env.NODE_ENV !== "production") {
-    globalForPrisma.prisma = _db;
+    globalForPrisma.prisma = client;
   }
-  return _db;
+  return client;
 }
 
 // Lazy proxy so existing `db.project...` / `db.$transaction(...)` keep working.
