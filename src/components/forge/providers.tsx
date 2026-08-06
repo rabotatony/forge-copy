@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ThemeProvider } from "next-themes";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
+import { AuthGate } from "@/components/forge/auth-gate";
 
 /**
  * Forge client-side providers:
@@ -12,9 +13,7 @@ import { Toaster } from "@/components/ui/sonner";
  * - TanStack Query for server state (forge API)
  * - Sonner Toaster for user-action feedback
  * - TooltipProvider so Tooltip works anywhere
- *
- * Marked 'use client' so QueryClientProvider can hold a stable client
- * instance across renders.
+ * - AuthGate: token login + session cookie gate
  */
 export function ForgeProviders({ children }: { children: ReactNode }) {
   const [client] = useState(
@@ -38,7 +37,9 @@ export function ForgeProviders({ children }: { children: ReactNode }) {
       disableTransitionOnChange
     >
       <QueryClientProvider client={client}>
-        <TooltipProvider delayDuration={200}>{children}</TooltipProvider>
+        <TooltipProvider delayDuration={200}>
+          <AuthGate>{children}</AuthGate>
+        </TooltipProvider>
         <Toaster position="bottom-right" richColors closeButton />
       </QueryClientProvider>
     </ThemeProvider>
