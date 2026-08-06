@@ -33,8 +33,12 @@ Forge's design layer and applied the produced package to
 
 ## Decisions
 
-- Emerald/red/amber Tailwind accents inside components (semantic status
-  colors) intentionally KEPT — this pilot touches the token layer only.
+- Phase 2 (palette unification): all 13 Tailwind color families used by
+  components (1,216 utility hits / 64 files) remapped onto the forge
+  identity via an `@theme` override block in globals.css — zero TSX edits.
+  emerald→patina, amber→ember gold, orange→rust, red→forge red,
+  rose→warm rose, zinc→warm ink, sky→steel, violet→heather, indigo→deep
+  steel, blue→steel blue, teal→patina teal, green→laurel, yellow→pale gold.
 - chart + destructive colors left untouched (they already have chroma).
 
 ## Rollback
