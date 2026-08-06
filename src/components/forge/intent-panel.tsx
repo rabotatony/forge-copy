@@ -150,12 +150,12 @@ export function IntentPanel({
 
         <CardContent className="space-y-3 pt-0">
           {/* Recommended workflows strip */}
-          {data.recommended.length > 0 && (
+          {(data.recommended ?? []).length > 0 && (
             <div className="flex flex-wrap items-center gap-1.5">
               <span className="text-xs font-medium text-muted-foreground">
                 Recommended:
               </span>
-              {data.recommended.slice(0, 5).map((key) => {
+              {(data.recommended ?? []).slice(0, 5).map((key) => {
                 const reason = data.reasons[key];
                 const isPrimary = key === data.primary;
                 return (
@@ -193,7 +193,7 @@ export function IntentPanel({
                 )}
                 {showDetails ? "Hide" : "Show"} detection details
                 <span className="ml-1 text-[10px] opacity-60">
-                  ({data.signals.length} signals)
+                  ({(data.signals ?? []).length} signals)
                 </span>
               </Button>
             </CollapsibleTrigger>
@@ -203,7 +203,7 @@ export function IntentPanel({
                   <Lightbulb className="size-3.5" aria-hidden />
                   How Forge reached this conclusion
                 </div>
-                {data.signals.map((sig, idx) => (
+                {(data.signals ?? []).map((sig, idx) => (
                   <SignalRow key={`${sig.intent}-${idx}`} signal={sig} />
                 ))}
               </div>
@@ -241,9 +241,9 @@ function SignalRow({ signal }: { signal: IntentSignal }) {
           </span>
           <span className="text-muted-foreground">{signal.reason}</span>
         </div>
-        {signal.evidence.length > 0 && (
+        {(signal.evidence ?? []).length > 0 && (
           <ul className="mt-0.5 space-y-0.5">
-            {signal.evidence.map((ev, i) => (
+            {(signal.evidence ?? []).map((ev, i) => (
               <li
                 key={i}
                 className="flex items-start gap-1 text-[11px] text-muted-foreground"
