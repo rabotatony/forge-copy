@@ -36,8 +36,11 @@ function createPrismaClient(): PrismaClient {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { PrismaD1 } = require("@prisma/adapter-d1");
       // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { getRequestContext } = require("@opennextjs/cloudflare");
-      const ctx = getRequestContext();
+      const { getCloudflareContext } = require("@opennextjs/cloudflare");
+      // Installed @opennextjs/cloudflare exports getCloudflareContext (the
+      // older getRequestContext no longer exists). Sync form is fine here:
+      // we only read the stable env.DB binding during request handling.
+      const ctx = getCloudflareContext();
       const adapter = new PrismaD1((ctx.env as Record<string, unknown>).DB);
       return new PrismaClient({ adapter, log: ["error"] });
     } catch {
