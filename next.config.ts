@@ -16,7 +16,19 @@ const isCloudflareBuild = process.env.FORGE_BUILD_TARGET === "cloudflare";
 const nextConfig: NextConfig = {
   // Keep heavy Node-only packages out of the Workers bundle (defensive —
   // Forge itself no longer imports `typescript` on the server).
-  serverExternalPackages: ["typescript", "sharp"],
+  //
+  // Prisma MUST stay external on Cloudflare builds: bundling @prisma/client
+  // into the worker makes it load its query engine via fs ("[unenv]
+  // fs.readdir is not implemented yet!"). Kept external, OpenNext resolves
+  // the workerd-condition build from node_modules and model queries work.
+  // (opennextjs-cloudflare#623, prisma/prisma#27041)
+  serverExternalPackages: [
+    "typescript",
+    "sharp",
+    "@prisma/client",
+    "@prisma/adapter-d1",
+    ".prisma/client",
+  ],
   reactStrictMode: false,
   typescript: {
     ignoreBuildErrors: true,
