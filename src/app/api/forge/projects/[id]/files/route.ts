@@ -50,11 +50,8 @@ export async function POST(
       project = await db.project.findUnique({ where: { id } });
     }
     if (!project) {
-      // Diagnostic: what does the raw layer see in THIS route's context?
-      let rawCheck: unknown = null;
-      try {
-        rawCheck = await db.$queryRaw`SELECT id, name FROM Project LIMIT 5`;
-      } catch (e) {
+      return fail("project not found", 404);
+    } catch (e) {
         rawCheck = `ERR ${e instanceof Error ? e.message.slice(0, 150) : e}`;
       }
       let ctxCheck: unknown = null;
