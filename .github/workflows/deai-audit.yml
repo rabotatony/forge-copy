@@ -1,45 +1,75 @@
 name: deai-audit
 
-# Automatically audit changed files for AI patterns on every pull request.
-# Non-blocking: it warns (annotation + summary) rather than failing, to avoid
-# false positives blocking work. Gives every agent automatic feedback.
-
 on:
   pull_request:
 
 jobs:
   audit:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      - name: Audit changed files for AI patterns
+      - name: Audit changed files
+        id: audit
         run: |
           BASE="${{ github.base_ref }}"
-          echo "Changed files vs $BASE:"
           CHANGED=$(git diff --name-only "origin/$BASE" HEAD || true)
-          FOUND=0
+          : > rows.txt
+          FAIL=0
           for f in $CHANGED; do
             case "$f" in
               *.md|*.txt|*.ts|*.tsx|*.js|*.jsx|*.css|*.scss)
                 if [ -f "$f" ] && [ -f "scripts/deai-check.mjs" ]; then
-                  echo ""
-                  echo "=== $f ==="
-                  node scripts/deai-check.mjs "$f" || true
-                  FOUND=1
+                  OUT=$(node scripts/deai-check.mjs "$f" || true)
+                  SCORE=$(printf '%s\n' "$OUT" | sed -n 's/^score: //p')
+                  VERDICT=$(printf '%s\n' "$OUT" | sed -n 's/^verdict: //p')
+                  SIGNALS=$(printf '%s\n' "$OUT" | sed -n 's/^signals: //p')
+                  echo "| $f | ${SCORE:-0} | ${VERDICT:-n/a} | ${SIGNALS:-none} |" >> rows.txt
+                  HIGH=$(node -e "console.log((parseFloat(process.argv[1]||'0')>=0.6)?1:0)" "$SCORE")
+                  if [ "$HIGH" = "1" ]; then FAIL=1; fi
                 fi
                 ;;
             esac
           done
-          if [ "$FOUND" -eq 0 ]; then
-            echo "No auditable changed files."
+          {
+            echo "## AI-pattern audit of changed files"
+            echo ""
+            echo "| File | Score | Verdict | Signals |"
+            echo "|------|-------|---------|---------|"
+            cat rows.txt
+            echo ""
+            echo "Score >= 0.6 fails; 0.4-0.6 warns. See AGENTS.md."
+          } > audit-summary.md
+          cat audit-summary.md
+          echo "fail=$FAIL" >> "$GITHUB_OUTPUT"
+
+      - name: Post PR comment
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            const body = fs.readFileSync("audit-summary.md", "utf8");
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+
+      - name: Enforce threshold
+        run: |
+          if [ "${{ steps.audit.outputs.fail }}" = "1" ]; then
+            echo "::error::A changed file scores >= 0.6 (clear AI patterns). Reduce them (see AGENTS.md)."
+            exit 1
           fi
-          echo ""
-          echo "Note: scores are a first-pass signal, not a verdict. See AGENTS.md."
+          echo "No file exceeds the 0.6 threshold."
