@@ -12,7 +12,7 @@ jobs:
         working-directory: ${{ runner.temp }}
         run: |
           npm init -y
-          npm i --no-fund --no-audit playwright
+          npm i --no-fund --no-audit playwright pngjs pngjs
           npx playwright install --with-deps chromium
       - name: shoot
         working-directory: ${{ runner.temp }}
