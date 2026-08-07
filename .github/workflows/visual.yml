@@ -1,0 +1,20 @@
+name: visual
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "0 * * * *"
+jobs:
+  shot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - run: npm init -y >/dev/null 2>&1 || true
+      - run: npm i playwright >/dev/null 2>&1
+      - run: npx playwright install chromium --with-deps >/dev/null 2>&1
+      - run: node scripts/visual.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shoshana-visual
+          path: visual/*.png
