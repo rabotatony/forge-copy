@@ -9,7 +9,8 @@
 // ============================================================
 import type { NextRequest } from "next/server";
 import { db } from "@/lib/db";
-import { writeStorageStream, sourceZipPath } from "@/lib/forge/storage-io";
+import { writeStorageStream } from "@/lib/forge/storage-io";
+import { sourceZipPath } from "@/lib/forge/storage";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
