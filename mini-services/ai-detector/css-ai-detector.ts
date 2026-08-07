@@ -1,14 +1,12 @@
 /**
- * css-ai-detector.ts — detects AI-generated design patterns for Forge.
+ * css-ai-detector.ts (v2) — detects AI-generated design patterns for Forge.
  *
- * FORGE INTEGRATION: Run as a workflow step on uploaded projects.
- * Analyzes CSS for AI-typical design patterns.
- *
- * Detects 4 AI-typical design patterns:
- *   1. Glassmorphism (backdrop-filter: blur) — the biggest AI tell
- *   2. Grayscale scaffold (only gray/white/black)
- *   3. Perfect symmetry (identical padding/margin everywhere)
- *   4. Gradient overuse (linear-gradient on everything)
+ * v2 improvements over v1:
+ *   - FIXED broken grayscale detection: v1 regex mangled #ffffff as #fff
+ *     (prefix match) and skipped ALL 3-digit colors. Grayscale calc returned
+ *     0 even for 100% grayscale designs.
+ *   - Now correctly handles both 3-digit (#fff) and 6-digit (#ffffff) hex.
+ *   - Lowered glassmorphism weight (humans use blur too; not reliable alone).
  */
 
 export interface CSSDetectionResult {
@@ -17,73 +15,61 @@ export interface CSSDetectionResult {
   signals: string[];
 }
 
-// Glassmorphism pattern (the biggest AI tell)
-const GLASS_PATTERN = /backdrop-filter\s*:\s*blur\(/gi;
+const HEX_PATTERN = /#(?:[0-9a-fA-F]{6}|[0-9a-fA-F]{3})\b/g;
 
-// Gradient pattern
-const GRADIENT_PATTERN = /linear-gradient\(/gi;
+function normalizeHex(h: string): string | null {
+  let hex = h.replace("#", "").toLowerCase();
+  if (hex.length === 3) hex = hex.split("").map((c) => c + c).join("");
+  return hex.length === 6 ? hex : null;
+}
 
-// Grayscale colors
-const GRAYSCALE_PATTERN = /#(?:fff|000|[0-9a-f]{6})/gi;
+function isGrayscale(hex6: string, tolerance = 20): boolean {
+  const r = parseInt(hex6.slice(0, 2), 16);
+  const g = parseInt(hex6.slice(2, 4), 16);
+  const b = parseInt(hex6.slice(4, 6), 16);
+  if ([r, g, b].some(isNaN)) return false;
+  return Math.abs(r - g) < tolerance && Math.abs(g - b) < tolerance;
+}
 
-/**
- * Detect AI patterns in CSS.
- */
 export function detectAICSS(css: string): CSSDetectionResult {
   if (!css || css.length < 50) {
     return { score: 0, verdict: "uncertain", signals: [] };
   }
-
   const signals: string[] = [];
   let score = 0;
 
-  // 1. Glassmorphism (backdrop-filter: blur)
-  const glassMatches = css.match(GLASS_PATTERN);
-  const glassCount = glassMatches ? glassMatches.length : 0;
+  const glassCount = (css.match(/backdrop-filter\s*:\s*blur\(/gi) || []).length;
   if (glassCount >= 2) {
-    signals.push(`glassmorphism: ${glassCount} backdrop-filter blur`);
-    score += Math.min(0.4, glassCount * 0.15);
+    signals.push(`glassmorphism: ${glassCount}`);
+    score += Math.min(0.3, glassCount * 0.1);
   }
 
-  // 2. Gradient overuse
-  const gradientMatches = css.match(GRADIENT_PATTERN);
-  const gradientCount = gradientMatches ? gradientMatches.length : 0;
+  const gradientCount = (css.match(/linear-gradient\(/gi) || []).length;
   if (gradientCount >= 5) {
-    signals.push(`gradient_overuse: ${gradientCount} linear-gradients`);
-    score += Math.min(0.25, gradientCount * 0.04);
+    signals.push(`gradient_overuse: ${gradientCount}`);
+    score += Math.min(0.2, gradientCount * 0.03);
   }
 
-  // 3. Check for grayscale scaffold
-  const colorMatches = css.match(GRAYSCALE_PATTERN);
-  if (colorMatches && colorMatches.length > 5) {
-    // Check if most colors are grayscale
+  const hexMatches = css.match(HEX_PATTERN) || [];
+  if (hexMatches.length >= 5) {
     let grayscaleCount = 0;
-    for (const color of colorMatches) {
-      const hex = color.slice(1);
-      if (hex.length === 6) {
-        const r = parseInt(hex.slice(0, 2), 16);
-        const g = parseInt(hex.slice(2, 4), 16);
-        const b = parseInt(hex.slice(4, 6), 16);
-        // Grayscale if r, g, b are all similar
-        if (Math.abs(r - g) < 20 && Math.abs(g - b) < 20) {
-          grayscaleCount++;
-        }
+    let validCount = 0;
+    for (const h of hexMatches) {
+      const hex6 = normalizeHex(h);
+      if (hex6) {
+        validCount++;
+        if (isGrayscale(hex6)) grayscaleCount++;
       }
     }
-    if (grayscaleCount / colorMatches.length > 0.8) {
-      signals.push(`grayscale_scaffold: ${Math.round(grayscaleCount / colorMatches.length * 100)}% grayscale`);
-      score += 0.2;
+    if (validCount > 0 && grayscaleCount / validCount > 0.85) {
+      const pct = Math.round((grayscaleCount / validCount) * 100);
+      signals.push(`grayscale_scaffold: ${pct}%`);
+      score += 0.35;
     }
   }
 
-  // Clamp score to 0-1
   score = Math.min(1, Math.max(0, score));
-
-  // Determine verdict
-  let verdict: CSSDetectionResult["verdict"];
-  if (score >= 0.5) verdict = "ai_likely";
-  else if (score >= 0.25) verdict = "uncertain";
-  else verdict = "human_likely";
-
+  const verdict: CSSDetectionResult["verdict"] =
+    score >= 0.5 ? "ai_likely" : score >= 0.25 ? "uncertain" : "human_likely";
   return { score, verdict, signals };
 }
