@@ -1,0 +1,84 @@
+{
+  "text": [
+    [
+      "ai",
+      "In today's fast-paced digital landscape, it's crucial to leverage cutting-edge solutions. This isn't just a tool, but a game-changing platform. Furthermore, it serves as a testament to innovation, fostering a seamless experience. Moreover, it's worth noting this represents a pivotal paradigm shift."
+    ],
+    [
+      "ai",
+      "Let's delve deeper into this rich tapestry of possibilities. It is important to note that this holistic approach plays a crucial role. When it comes to unlocking potential, this cutting-edge solution truly shines. In conclusion, it's a game-changer."
+    ],
+    [
+      "ai",
+      "This seamless and robust platform offers a wide range of features. Additionally, it's worth mentioning that it plays a crucial role in fostering innovation. A testament to cutting-edge design, it unlocks new possibilities."
+    ],
+    [
+      "human",
+      "I went to the market yesterday. The tomatoes were too expensive so I skipped them. Got some bread and cheese instead. The guy at the counter remembered me from last week."
+    ],
+    [
+      "human",
+      "The old dog limped across the yard. His owner watched from the porch, coffee going cold in her hands. Neither of them was in a hurry. The fence needed fixing again."
+    ],
+    [
+      "human",
+      "My bike chain broke on the bridge. I walked it home, three miles, and my shoulders ached by the end. The repair shop was closed. Typical."
+    ],
+    [
+      "ai",
+      "בעולם המודרני של היום, חשוב לנצל פתרונות חדשניים. זה לא רק כלי, אלא פלטפורמה פורצת דרך. יתרה מזאת, ניתן לראות שמדובר בעדות לחדשנות. בנוסף לכך, ראוי לציין שזה מייצג שינוי משמעותי."
+    ],
+    [
+      "ai",
+      "בעידן המודרני, אין ספק ששילוב של טכנולוגיות מתקדמות מייצר חוויה ייחודית. חשוב לציין שמגוון רחב של אפשרויות עומד לרשות המשתמש. מדובר בפתרון חדשני ופורץ דרך."
+    ],
+    [
+      "human",
+      "הלכתי לשוק אתמול. העגבניות היו יקרות אז ויתרתי עליהן. קניתי לחם וגבינה במקום. המוכר בדוכן זכר אותי משבוע שעבר."
+    ],
+    [
+      "human",
+      "החתול ישב על אדן החלון והביט ברחוב. לא זז, לא מיאוו. פשוט הביט. אחרי שעה קם והלך לחדר השני. זהו."
+    ],
+    [
+      "human",
+      "שכחתי את המפתחות בתוך הדירה. דפקתי על הדלת של השכן, והוא פתח לי בפיג'מה. צחקנו. הוא נתן לי סולם."
+    ]
+  ],
+  "code": [
+    [
+      "ai",
+      "function processData(data) {\n  console.log('Starting', data);\n  let temp = data;\n  console.log('temp:', temp);\n  const result = temp.map(item => {\n    console.log('item:', item);\n    return item;\n  });\n  const url = 'https://example.com/api';\n  return result;\n}"
+    ],
+    [
+      "ai",
+      "function handleRequest(req) {\n  console.log('request received');\n  console.log('processing...');\n  // TODO: implement proper error handling\n  // FIXME: this is a hack\n  const tmp = req.body;\n  console.log('body:', tmp);\n  return tmp;\n}"
+    ],
+    [
+      "human",
+      "function calculateTotal(items) {\n  return items.reduce((sum, item) => sum + item.price * item.quantity, 0);\n}\n\nfunction formatPrice(amount) {\n  return new Intl.NumberFormat('he-IL', { style: 'currency', currency: 'ILS' }).format(amount);\n}"
+    ],
+    [
+      "human",
+      "async function fetchUser(userId) {\n  try {\n    const response = await fetch(`/api/users/${userId}`);\n    if (!response.ok) {\n      throw new Error(`User not found: ${userId}`);\n    }\n    return await response.json();\n  } catch (error) {\n    console.error('Failed to fetch user', error);\n    throw error;\n  }\n}"
+    ]
+  ],
+  "css": [
+    [
+      "ai",
+      ".body { background: #fff; color: #000; }\n.card { background: #f5f5f5; border: 1px solid #e0e0e0; }\n.header { background: #fafafa; color: #333; }\n.text { color: #666; }\n.muted { color: #999; }\n.glass { backdrop-filter: blur(10px); }\n.glass2 { backdrop-filter: blur(20px); }"
+    ],
+    [
+      "ai",
+      ".container { background: #ffffff; color: #111111; }\n.divider { background: #eeeeee; }\n.shadow { background: #f0f0f0; }\n.border { border-color: #dddddd; }\n.glass { backdrop-filter: blur(8px); }\n.glass-alt { backdrop-filter: blur(12px); }"
+    ],
+    [
+      "human",
+      ".hero { background: linear-gradient(135deg, #ff6b6b, #4ecdc4); }\n.button { background: #ff6b6b; color: white; }\n.accent { color: #4ecdc4; }\n.dark { background: #1a1a2e; color: #e94560; }\n.warn { color: #f39c12; }"
+    ],
+    [
+      "human",
+      ".sunset { background: radial-gradient(circle, #ff9a56, #ff6b6b); }\n.ocean { background: #1e3c72; }\n.forest { background: #2d5016; color: #a8e6cf; }\n.gold { color: #ffd700; }"
+    ]
+  ]
+}
