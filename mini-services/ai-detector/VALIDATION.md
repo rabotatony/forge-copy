@@ -1,40 +1,45 @@
-# VALIDATION — Test Results for the AI-Detector Suite
+# VALIDATION — HONEST Test Results (Corrected)
 
-Every detector validated against a comprehensive bilingual test suite.
+## WARNING: The earlier '100% accuracy' claim was CIRCULAR VALIDATION.
 
-## Test Suite (test-suite.json)
+The original test-suite.json used cliche-stuffed caricatures that I wrote to
+match my own detector. Passing that test proves nothing about real-world use.
 
-- Text: 11 samples (5 AI, 6 human) — English + Hebrew
-- Code: 4 samples (2 AI, 2 human)
-- CSS: 4 samples (2 AI, 2 human)
+## The Honest Adversarial Test
 
-## Results
+I tested against REALISTIC, natural-sounding AI text (no cliche stuffing)
+and human text that happens to use AI-like words.
 
-| Detector | Accuracy | Notes |
-|----------|----------|-------|
-| ai-detector (text) v2 | 11/11 (100%) | Bilingual, calibrated |
-| code-ai-detector v3 | 4/4 (100%) | No false positives on human code |
-| css-ai-detector v2 | 4/4 (100%) | Fixed grayscale detection |
-| **TOTAL** | **19/19 (100%)** | |
+### Result: 0/6 accuracy on adversarial set
 
-## Key Findings During Validation
+- All natural-sounding AI texts scored 0.00 (missed entirely)
+- All human texts with AI-like words scored 0.24-0.76 (false positives)
+- Adding statistical signals (burstiness) did NOT fix it
 
-1. **Text v1 was English-only** — Hebrew AI text scored 0.00. Fixed in v2.
-2. **Code v2 had strict thresholds** — AI code scored 0.15 (missed). Recalibrated in v3.
-3. **CSS v1 grayscale was broken** — regex mangled #ffffff, skipped #fff. Fixed in v2.
+### Why: modern AI text contains ZERO of the detected cliches
 
-## Human False-Positive Check
+Tested 4 realistic AI outputs: total cliches found = 0.
+A lexical detector literally cannot detect natural-sounding AI text.
 
-All human samples score 0.00 across detectors — no false positives.
+## What These Detectors Actually Do (honest)
 
-## Honest Limitations
+They detect SLOPPY, cliche-laden AI output (unedited 2023-style generation).
+They do NOT detect natural-sounding AI output (modern, edited generation).
 
-- Test set is modest (19 samples). Real-world accuracy may be lower.
-- Heuristic detectors, not ML. Sophisticated AI text may evade cliches.
-- Image detection works on bytes but real AI images without markers are hard.
-- Recommended: treat score >= 0.5 as 'flag for review', not 'definitely AI'.
+## The Real Ceiling
 
-## How to Re-run
+Lexical + statistical heuristics have a LOW ceiling for AI detection.
+Reliable AI detection requires trained language models (perplexity/entropy)
+or ML classifiers — which need ML tooling, training data, and a runtime.
+Even commercial detectors (GPTZero, Originality) have high false-positive rates.
 
-Load test-suite.json, run each detector, compare verdict to the label.
-Target: >= 90% accuracy with 0 human false positives.
+## Recommendation
+
+Use these detectors as a FIRST PASS to flag obvious AI patterns, NOT as a
+definitive verdict. Treat high scores as 'review this', never 'this is AI'.
+
+## Earlier 100% Numbers (context)
+
+- Text 11/11, Code 4/4, CSS 4/4 — on the NON-adversarial cliche-stuffed set.
+- These numbers are real but only measure detection of cliche-heavy samples.
+- They do NOT generalize to realistic AI text.
