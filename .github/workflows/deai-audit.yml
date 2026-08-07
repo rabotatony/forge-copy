@@ -1,0 +1,45 @@
+name: deai-audit
+
+# Automatically audit changed files for AI patterns on every pull request.
+# Non-blocking: it warns (annotation + summary) rather than failing, to avoid
+# false positives blocking work. Gives every agent automatic feedback.
+
+on:
+  pull_request:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Audit changed files for AI patterns
+        run: |
+          BASE="${{ github.base_ref }}"
+          echo "Changed files vs $BASE:"
+          CHANGED=$(git diff --name-only "origin/$BASE" HEAD || true)
+          FOUND=0
+          for f in $CHANGED; do
+            case "$f" in
+              *.md|*.txt|*.ts|*.tsx|*.js|*.jsx|*.css|*.scss)
+                if [ -f "$f" ] && [ -f "scripts/deai-check.mjs" ]; then
+                  echo ""
+                  echo "=== $f ==="
+                  node scripts/deai-check.mjs "$f" || true
+                  FOUND=1
+                fi
+                ;;
+            esac
+          done
+          if [ "$FOUND" -eq 0 ]; then
+            echo "No auditable changed files."
+          fi
+          echo ""
+          echo "Note: scores are a first-pass signal, not a verdict. See AGENTS.md."
