@@ -57,6 +57,19 @@ export function auditProject(files: ProjectFile[]): ProjectAuditResult {
     const type = getFileType(file.path);
     if (!type) continue;
 
+    // Images require metadata-based analysis (EXIF, markers) — not raw content.
+    // Record them for separate handling via detectAIImage.
+    if (type === "image") {
+      fileResults.push({
+        path: file.path,
+        type,
+        score: 0,
+        verdict: "uncertain",
+        signals: ["image_requires_metadata: use detectAIImage with EXIF data"],
+      });
+      continue;
+    }
+
     let result;
     if (type === "css") {
       result = detectAICSS(file.content);
