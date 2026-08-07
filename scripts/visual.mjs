@@ -4,34 +4,23 @@ import png from "pngjs";
 const BASE=process.env.BASE||"https://roses-cj2.pages.dev";
 const out=process.env.OUT||"visual";
 mkdirSync(out,{recursive:true});
-const routes=["","hana","hakara","shkila"];
 const browser=await chromium.launch();
+function ascii(path){try{const p=png.PNG.sync.read(readFileSync(path));const W=76,H=36;const sx=Math.floor(p.width/W),sy=Math.floor(p.height/H);
+ const chars=" .:-=+*#%@";let rows=[];
+ for(let y=0;y<H;y++){let line="";for(let x=0;x<W;x++){let mn=255,mx=0;
+  for(let dy=0;dy<sy;dy+=2)for(let dx=0;dx<sx;dx+=2){const i=((y*sy+dy)*p.width+(x*sx+dx))*4;const l=0.2126*p.data[i]+0.7152*p.data[i+1]+0.0722*p.data[i+2];if(l<mn)mn=l;if(l>mx)mx=l;}
+  const e=(mx-mn)/255;line+=chars[Math.min(9,Math.floor(e*10))];}rows.push(line);}
+ return rows.join("\n");}catch(e){return "err";}}
 const page=await browser.newPage({viewport:{width:1280,height:800}});
-const errors=[];
-page.on("pageerror",e=>errors.push("pageerror:"+String(e).slice(0,80)));
-function ascii(path){
- try{
-  const p=png.PNG.sync.read(readFileSync(path));
-  const W=72,H=34;const sx=Math.floor(p.width/W),sy=Math.floor(p.height/H);
-  const chars=" .:-=+*#%@";let rows=[];
-  for(let y=0;y<H;y++){let line="";
-   for(let x=0;x<W;x++){let sum=0,cnt=0;
-    for(let dy=0;dy<sy;dy+=2)for(let dx=0;dx<sx;dx+=2){const i=((y*sy+dy)*p.width+(x*sx+dx))*4;sum+=0.2126*p.data[i]+0.7152*p.data[i+1]+0.0722*p.data[i+2];cnt++;}
-    // edge-energy: deviation within cell -> shows structure on dark OR light
-    let mn=255,mx=0;for(let dy=0;dy<sy;dy+=2)for(let dx=0;dx<sx;dx+=2){const i=((y*sy+dy)*p.width+(x*sx+dx))*4;const l=0.2126*p.data[i]+0.7152*p.data[i+1]+0.0722*p.data[i+2];if(l<mn)mn=l;if(l>mx)mx=l;}
-    const e=(mx-mn)/255;line+=chars[Math.min(chars.length-1,Math.floor(e*chars.length))];}
-   rows.push(line);}
-  return rows.join("\n");
- }catch(e){return "ascii-err:"+e.message;}
+await page.goto(BASE+"/",{waitUntil:"load"}).catch(()=>{});
+for(const ms of [500,1000,3000,6000,10000,15000]){
+ await page.waitForTimeout(ms===500?500:ms-(ms===1000?500:ms===3000?1000:ms===6000?3000:ms===10000?6000:10000));
+ const f=out+"/t"+ms+".png";await page.screenshot({path:f});
+ console.log("T_"+ms+"\n"+ascii(f)+"\nENDT");
 }
-let report=[];
-for(const r of routes){
- await page.goto(BASE+"/"+r,{waitUntil:"load",timeout:20000}).catch(()=>{});
- await page.waitForTimeout(4200);
- const f=out+"/d-"+(r||"home")+".png";
- await page.screenshot({path:f});
- report.push({route:r||"/",ascii:ascii(f)});
-}
+await page.setViewportSize({width:390,height:844});
+await page.goto(BASE+"/",{waitUntil:"load"}).catch(()=>{});
+await page.waitForTimeout(6000);
+await page.screenshot({path:out+"/m-home.png"});
+console.log("T_mobile\n"+ascii(out+"/m-home.png")+"\nENDT");
 await browser.close();
-for(const rt of report){console.log("ASCII_"+rt.route+"\n"+rt.ascii+"\nEND_"+rt.route);}
-console.log("ERR "+JSON.stringify(errors.slice(0,5)));
