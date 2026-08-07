@@ -18,7 +18,7 @@ import {
 } from "./use-forge-api";
 import { KindBadge, StatusBadge } from "./status-badge";
 import { formatBytes, formatRelativeTime } from "./format";
-import { ErrorState, Loading } from "./ui";
+import { ErrorState, Loading, Safe } from "./ui";
 import { useStartRun } from "./use-forge-api";
 import { toast } from "sonner";
 
@@ -202,17 +202,17 @@ export function ProjectWorkspace({
             )}
 
             {/* Capability Card — what Forge detected + what it can do */}
-            <CapabilityCard projectId={projectId} />
+            <Safe label="Capability overview"><CapabilityCard projectId={projectId} /></Safe>
 
             {/* Build Intelligence — capabilities + one-click config generation */}
-            <BuildIntelligencePanel projectId={projectId} />
-            <ArtifactsPanel projectId={projectId} />
+            <Safe label="Build intelligence"><BuildIntelligencePanel projectId={projectId} /></Safe>
+            <Safe label="Artifacts"><ArtifactsPanel projectId={projectId} /></Safe>
 
             {/* Insights — profile-aware recommendations */}
-            <InsightsPanel projectId={projectId} onRunStarted={onOpenRun} />
+            <Safe label="Insights"><InsightsPanel projectId={projectId} onRunStarted={onOpenRun} /></Safe>
 
             {/* Activity Timeline — unified feed */}
-            <ActivityTimeline projectId={projectId} onOpenRun={onOpenRun} />
+            <Safe label="Activity timeline"><ActivityTimeline projectId={projectId} onOpenRun={onOpenRun} /></Safe>
 
             {/* Collapsible advanced analysis */}
             <details className="group rounded-lg border border-border bg-card/30">
