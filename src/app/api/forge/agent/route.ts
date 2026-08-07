@@ -12,6 +12,8 @@
 import type { NextRequest } from "next/server";
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
+import { selectNode, createTask } from "@/lib/forge/mesh";
+import { db } from "@/lib/db";
 import * as fs from "node:fs";
 import { db } from "@/lib/db";
 
@@ -30,6 +32,23 @@ async function shell(cmd: string) {
   }
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+async function meshRun(cmd: string) {
+  try {
+    const node = await selectNode([]);
+    if (!node) return null;
+    const task = await createTask((node as any).id, "cmd", { command: cmd });
+    for (let i = 0; i < 22; i++) {
+      await sleep(2000);
+      const t = await db.nodeTask.findUnique({ where: { id: task.id } });
+      if (t && (t.status === "done" || t.status === "failed")) {
+        return { ok: t.status === "done", stdout: t.result ?? "", stderr: t.error ?? "", via: "mesh", node: (node as any).slug };
+      }
+    }
+    return { ok: false, error: "mesh task still running", via: "mesh", taskId: task.id };
+  } catch { return null; }
+}
+
 function caps() {
   let filesystem = false, child = false;
   try { filesystem = fs.existsSync("/"); } catch {}
@@ -44,7 +63,13 @@ export async function POST(req: NextRequest): Promise<Response> {
   if (action === "run") {
     const cmd = String(body.cmd ?? "");
     if (!cmd) return Response.json({ error: "cmd required" }, { status: 400 });
-    return Response.json(await shell(cmd));
+    const local = await shell(cmd);
+    // If child_process is unavailable (edge), fall back to a mesh node.
+    if (!local.ok && /not implemented|unenv/i.test(String(local.error ?? ""))) {
+      const m = await meshRun(cmd);
+      if (m) return Response.json(m);
+    }
+    return Response.json(local);
   }
 
   if (action === "capabilities") {
