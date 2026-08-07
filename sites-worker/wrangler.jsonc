@@ -1,0 +1,8 @@
+{
+  "name": "forge-sites",
+  "main": "index.js",
+  "compatibility_date": "2024-09-01",
+  "r2_buckets": [
+    { "binding": "STORAGE", "bucket_name": "forge-storage" }
+  ]
+}
