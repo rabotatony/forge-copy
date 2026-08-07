@@ -1,0 +1,35 @@
+name: build
+
+# Full production build check. Catches render/config errors that tsc misses.
+# Non-blocking (continue-on-error): warns on failure so it informs without
+# halting work, but a failing build is a strong signal something is broken.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Production build (next build)
+        run: bun run build
+
+      - name: Warn on failure
+        if: failure()
+        run: |
+          echo "::warning::Production build FAILED. A page or config is broken."
+          echo "::warning::This often means a component renders nothing or crashes."
