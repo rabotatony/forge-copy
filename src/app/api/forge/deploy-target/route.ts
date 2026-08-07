@@ -86,5 +86,31 @@ export async function POST(req: NextRequest): Promise<Response> {
     });
   }
 
+
+  if (provider === "northflank") {
+    const region = String(b.region ?? "europe-west");
+    const app = String(b.app ?? "forge");
+    const image = String(b.image ?? "ghcr.io/rabotatony/forge:latest");
+    const NF = "https://api.northflank.com/v1";
+    const hdr = { Authorization: "Bearer " + token, "Content-Type": "application/json" };
+    // create project (idempotent-ish: ignore 409/exists)
+    const pr = await fetch(NF + "/projects", { method: "POST", headers: hdr, body: JSON.stringify({ name: app, region }) });
+    const prj = await pr.json().catch(() => ({}));
+    const pid = (prj as any)?.data?.id ?? app;
+    // create service running the image
+    const sv = await fetch(NF + `/projects/${pid}/services`, {
+      method: "POST", headers: hdr,
+      body: JSON.stringify({
+        name: app, type: "workload",
+        spec: {
+          container: { dockerImage: image, imagePullPolicy: "always", environmentVariables: { PORT: "3000", DATABASE_URL: "file:/data/forge.db" }, ports: [{ containerPort: 3000, protocol: "HTTP" }] },
+          networking: { public: true },
+        },
+      }),
+    });
+    const svj = await sv.json().catch(() => ({}));
+    return Response.json({ provider, project: pid, serviceStatus: sv.status, service: (svj as any)?.data?.id ?? svj, note: "Forge service provisioning on Northflank" });
+  }
+
   return Response.json({ error: "unknown provider: " + provider }, { status: 400 });
 }
