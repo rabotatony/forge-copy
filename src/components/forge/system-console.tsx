@@ -85,7 +85,6 @@ export function SystemConsole() {
       <div className="space-y-4">
         {active.panels.map(([key, Comp]) => (
           <Suspense key={key} fallback={<Loading label={`Loading ${active.label}…`} />}>
-            {/* @ts-expect-error lazy component */}
             <Comp />
           </Suspense>
         ))}
