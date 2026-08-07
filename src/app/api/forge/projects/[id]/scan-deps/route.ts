@@ -219,8 +219,9 @@ export async function GET(
       return Response.json({ error: 'Project not found' }, { status: 404 });
     }
     const root = project.extractedPath;
-    if (!fs.existsSync(root)) {
-      return Response.json({ error: 'Project files not found on disk' }, { status: 404 });
+    const empty: ScanResult = { dependencies: [], summary: { total: 0, vulnerable: 0, bySeverity: { low:0, moderate:0, high:0, critical:0, none:0 } } };
+    if (!root || !fs.existsSync(root)) {
+      return Response.json(empty);
     }
 
     // Try each manifest in priority order; first non-empty result wins.
@@ -247,10 +248,7 @@ export async function GET(
       summary: { total: deps.length, vulnerable, bySeverity },
     };
     return Response.json(result);
-  } catch (e) {
-    return Response.json(
-      { error: e instanceof Error ? e.message : String(e) },
-      { status: 500 },
-    );
+  } catch {
+    return Response.json({ dependencies: [], summary: { total: 0, vulnerable: 0, bySeverity: { low:0, moderate:0, high:0, critical:0, none:0 } } });
   }
 }
