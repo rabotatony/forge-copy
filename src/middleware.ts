@@ -217,6 +217,14 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     return response;
   }
 
+  // Auth is OFF by default (self-hosted tool, open out of the box).
+  // Set FORGE_AUTH_ENABLED=1 to require fk_ tokens / session cookie.
+  if (process.env.FORGE_AUTH_ENABLED !== '1') {
+    const response = NextResponse.next();
+    response.headers.set('x-ratelimit-limit', String(limit));
+    return response;
+  }
+
   // Public (self-authenticated) routes:
   if (isPublic(pathname, request.method)) {
     return NextResponse.next();
