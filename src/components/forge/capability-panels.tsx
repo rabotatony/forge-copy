@@ -28,9 +28,8 @@ export function StatsPanel() {
     const r = await fetch("/api/forge/stats"); setD(await r.json().catch(() => null));
   }, []);
   useEffect(() => { load(); }, [load]);
-  const runs = d?.runs ?? [];
-  const done = runs.filter((r: any) => r.status === "succeeded" || r.status === "success").length;
-  const rate = runs.length ? Math.round((done / runs.length) * 100) : null;
+  const rate = d?.successRate;
+  const rateStr = rate === undefined || rate === null ? "–" : `${Math.round(rate <= 1 && d?.totalRuns > 0 ? rate * 100 : rate)}%`;
   const Cell = ({ label, value }: { label: string; value: any }) => (
     <div className="rounded-lg border border-border bg-background/40 p-4 text-center">
       <div className="text-2xl font-bold text-emerald-500">{value ?? "–"}</div>
@@ -41,10 +40,10 @@ export function StatsPanel() {
     <div className={card}>
       <Head title="Overview" sub="Live counts across Forge." />
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <Cell label="Projects" value={d?.projectCount} />
-        <Cell label="Runs" value={d?.runCount} />
-        <Cell label="Success rate" value={rate === null ? "–" : `${rate}%`} />
-        <Cell label="Recent runs" value={runs.length} />
+        <Cell label="Projects" value={d?.projects} />
+        <Cell label="Total runs" value={d?.totalRuns} />
+        <Cell label="Success rate" value={rateStr} />
+        <Cell label="Running now" value={d?.runningCount} />
       </div>
     </div>
   );
@@ -71,7 +70,7 @@ export function AuditLogPanel() {
               <tr key={i} className="border-t border-border/50">
                 <td className="py-1 pr-3 text-muted-foreground">{new Date(e.createdAt ?? e.at ?? Date.now()).toLocaleTimeString()}</td>
                 <td className="py-1 pr-3">{e.action ?? e.event ?? e.type ?? "–"}</td>
-                <td className="py-1 text-muted-foreground">{String(e.detail ?? e.message ?? e.target ?? "").slice(0, 60)}</td>
+                <td className="py-1 text-muted-foreground">{String(e.details ?? e.detail ?? e.message ?? e.target ?? "").slice(0, 60)}</td>
               </tr>
             ))}
           </tbody>
