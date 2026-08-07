@@ -310,6 +310,32 @@ export async function POST(request: NextRequest): Promise<Response> {
 
     const buf = Buffer.from(await file.arrayBuffer());
 
+    // ---- Fast path for large archives ----
+    // Inline extraction of a big archive burns CPU and trips the Workers
+    // CPU limit (error 1102). For large files we store the raw archive and
+    // defer extraction/analysis, returning immediately.
+    const FAST_THRESHOLD = 8 * 1024 * 1024; // 8 MB
+    if (file.size > FAST_THRESHOLD) {
+      const project = await db.project.create({
+        data: {
+          name,
+          fileName: file.name,
+          extractedPath: "",
+          fileSize: file.size,
+          fileCount: 0,
+          kind: "node",
+          detection: "{}",
+          ...(repoUrl ? { repoUrl } : {}),
+        },
+      });
+      const lower = file.name.toLowerCase();
+      const archivePath = lower.endsWith(".zip")
+        ? sourceZipPath(project.id)
+        : sourceZipPath(project.id).replace(/source\.zip$/, "source.tar.gz");
+      await writeStorageFile(archivePath, buf);
+      return Response.json({ id: project.id, name, deferred: true, note: "Large archive stored; extraction deferred." }, { status: 201 });
+    }
+
     let entries: Entry[];
     try {
       entries = await extractEntries(file.name, buf);
