@@ -1,57 +1,54 @@
-# AI Detector Mini-Service
+# AI Detector Suite for Forge
 
-A comprehensive AI-content detection suite for Forge workflows.
+A comprehensive AI-content detection suite — text, code, design, and images.
+A unique capability for a CI/CD platform.
 
-## Capabilities
-
-Four detectors, one audit:
+## The 5 Detectors
 
 ### 1. ai-detector.ts — Text
-Detects AI-typical patterns in text (docs, comments, markdown):
-- Lexical cliches (delve, tapestry, leverage, etc.)
+Detects AI patterns in text/docs/markdown:
+- Lexical cliches (delve, tapestry, leverage)
 - Contrast constructions ('not just X, but Y')
-- Em-dash density (AI signature)
+- Em-dash density
 
 ### 2. code-ai-detector.ts — Code
-Detects AI-typical patterns in source code:
-- Debug console leftovers (console.log, print)
+Detects AI patterns in source code:
+- Debug console leftovers
 - TODO/FIXME/HACK trails
-- Generic naming (data, temp, value, handler)
-- Placeholder values (lorem, example.com, dummy)
+- Generic naming, placeholder values
 
 ### 3. css-ai-detector.ts — Design
-Detects AI-typical patterns in CSS:
-- Glassmorphism (backdrop-filter: blur) — the biggest AI tell
-- Grayscale scaffold (only gray/white/black)
+Detects AI patterns in CSS:
+- Glassmorphism (backdrop-filter: blur)
+- Grayscale scaffold
 - Gradient overuse
 
-### 4. audit.ts — Comprehensive Audit
-Combines all three detectors into one project audit.
-Analyzes all files and produces an authenticity report.
+### 4. image-ai-detector.ts — Images
+Detects AI-generated images:
+- Missing EXIF camera data
+- AI-tool metadata markers (DALL-E, Midjourney, SD)
+- AI-typical dimensions
 
-## Why This Matters for Forge
-
-Forge inspects uploaded projects and runs workflows on them.
-This suite adds a unique capability: detecting AI-generated
-content as part of CI/CD. No other CI/CD platform offers this.
-
-## Usage
-
-    import { auditProject } from './audit';
-    const result = auditProject(projectFiles);
-    // returns { overallScore, verdict, fileResults, summary }
-
-## Integration
-
-Add as a workflow step in Forge pipelines:
-
-    - name: Audit AI content
-      run: ai-detector --audit ./project --threshold 0.5
+### 5. audit.ts — Comprehensive Audit
+Combines all detectors. Analyzes every file in a project
+and produces an authenticity report.
 
 ## Files
 
-- ai-detector.ts — text detection
-- code-ai-detector.ts — code detection
-- css-ai-detector.ts — design detection
+- ai-detector.ts — text
+- code-ai-detector.ts — code
+- css-ai-detector.ts — design
+- image-ai-detector.ts — images
 - audit.ts — comprehensive audit
 - README.md — this file
+
+## Integration
+
+- API endpoint: POST /api/forge/ai-audit (in src/app/api/forge/ai-audit/)
+- Workflow template: examples/ai-audit-workflow/
+- UI component: examples/ai-audit-workflow/AIAuditPanel.tsx
+
+## Why This Matters
+
+Forge is the first CI/CD platform to offer AI-content detection.
+This differentiates it from every other tool in the market.
