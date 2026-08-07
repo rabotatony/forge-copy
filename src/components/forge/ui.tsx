@@ -324,6 +324,15 @@ interface _SafeState { error: Error | null }
 export class Safe extends _SafeComp<{ children: _SafeNode; label?: string }, _SafeState> {
   state: _SafeState = { error: null };
   static getDerivedStateFromError(error: Error): _SafeState { return { error }; }
+  componentDidCatch(error: Error) {
+    // Report the crash to live UI telemetry so an orchestrator can "see" it.
+    try {
+      fetch("/api/forge/telemetry", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "panel-crash", panel: this.props.label ?? "unknown", error: String(error?.message ?? error) }),
+      }).catch(() => {});
+    } catch {}
+  }
   render() {
     if (this.state.error) {
       return (
