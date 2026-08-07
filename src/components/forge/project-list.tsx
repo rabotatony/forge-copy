@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import {
   FileArchive,
   Files,
@@ -64,6 +64,13 @@ export function ProjectList({
   const [query, setQuery] = useState("");
   const [kindFilter, setKindFilter] = useState<string>("all");
   const [createOpen, setCreateOpen] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onOpen = () => setCreateOpen(true);
+    window.addEventListener("forge:open-upload", onOpen);
+    return () => window.removeEventListener("forge:open-upload", onOpen);
+  }, []);
   const { t } = useTranslation();
 
   const filtered = useMemo(() => {
