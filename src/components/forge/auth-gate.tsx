@@ -16,7 +16,7 @@ import { Input } from "@/components/ui/input";
 
 type GateState = "loading" | "in" | "out";
 
-export function AuthGate({ children }: { children: React.ReactNode }) {
+export function AuthGate({ children }: { children: ReactNode }) {
   // Auth is optional and OFF by default. The app is open out of the box;
   // set FORGE_AUTH_ENABLED=1 and use /api/forge/auth/login to require login.
   return <>{children}</>;
