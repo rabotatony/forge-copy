@@ -308,12 +308,8 @@ export async function POST(request: NextRequest): Promise<Response> {
         : file.name.replace(/\.(zip|tar\.gz|tgz|tar)$/i, "").replace(/\.[a-z0-9]+$/i, "") || "project";
     const repoUrl = typeof repoUrlField === "string" && repoUrlField.trim() ? repoUrlField.trim() : undefined;
 
-    const buf = Buffer.from(await file.arrayBuffer());
-
-    // ---- Fast path for large archives ----
-    // Inline extraction of a big archive burns CPU and trips the Workers
-    // CPU limit (error 1102). For large files we store the raw archive and
-    // defer extraction/analysis, returning immediately.
+    // ---- Fast path: STREAM large archives directly (no memory buffer, no extraction) ----
+    // Avoids BOTH the Workers CPU limit (1102) and the memory limit for huge files.
     const FAST_THRESHOLD = 8 * 1024 * 1024; // 8 MB
     if (file.size > FAST_THRESHOLD) {
       const project = await db.project.create({
@@ -332,9 +328,11 @@ export async function POST(request: NextRequest): Promise<Response> {
       const archivePath = lower.endsWith(".zip")
         ? sourceZipPath(project.id)
         : sourceZipPath(project.id).replace(/source\.zip$/, "source.tar.gz");
-      await writeStorageFile(archivePath, buf);
-      return Response.json({ id: project.id, name, deferred: true, note: "Large archive stored; extraction deferred." }, { status: 201 });
+      await writeStorageStream(archivePath, file.stream());
+      return Response.json({ id: project.id, name, deferred: true, note: "Large archive streamed to storage; extraction deferred." }, { status: 201 });
     }
+
+    const buf = Buffer.from(await file.arrayBuffer());
 
     let entries: Entry[];
     try {
