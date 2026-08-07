@@ -67,7 +67,7 @@ export async function writeStorageFile(absOrRel: string, data: Buffer | string):
 
 export async function writeStorageStream(absOrRel: string, stream: ReadableStream): Promise<void> {
   const rel = toRel(absOrRel);
-  if (!isWorkersRuntime()) {
+  if (!isWorkers()) {
     // local fs: collect stream then write
     const chunks: Uint8Array[] = [];
     const reader = stream.getReader();
