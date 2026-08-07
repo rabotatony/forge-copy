@@ -1,7 +1,8 @@
 "use client";
 
+import { useState, lazy, Suspense } from "react";
 import {
-  useState, lazy, Suspense, from, react, ArrowLeft, FileArchive, Files, History, HardDrive, LayoutGrid, Code2, Workflow, Settings, Download, Loader2, Check, Key, Webhook, Github, Cloud, TerminalSquare,
+  ArrowLeft, FileArchive, Files, History, HardDrive, LayoutGrid, Code2, Workflow, Settings, Download, Loader2, Check, Key, Webhook, Github, Cloud, TerminalSquare,
 } from "lucide-react";
 import {
   Card,
