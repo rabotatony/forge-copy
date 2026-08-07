@@ -508,3 +508,10 @@ model NodeTask {
 
   @@index([nodeId, status])
 }
+
+model Memory {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     String
+  updatedAt DateTime @updatedAt
+}
