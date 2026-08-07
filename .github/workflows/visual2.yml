@@ -1,0 +1,25 @@
+name: visual2
+on:
+  workflow_dispatch: {}
+jobs:
+  shot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - name: install playwright in temp
+        working-directory: ${{ runner.temp }}
+        run: |
+          npm init -y
+          npm i --no-fund --no-audit playwright
+          npx playwright install --with-deps chromium
+      - name: shoot
+        working-directory: ${{ runner.temp }}
+        run: |
+          cp $GITHUB_WORKSPACE/scripts/visual.mjs .
+          OUT=$GITHUB_WORKSPACE/visual node visual.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shoshana-visual
+          path: visual/*.png
