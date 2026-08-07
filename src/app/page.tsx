@@ -80,8 +80,12 @@ function viewToHash(view: View) {
 }
 
 export default function ForgePage() {
-  const [view, setView] = useState<View>(() => parseHash());
+  const [view, setView] = useState<View>({ kind: "surface", surface: "projects" });
   const [cmdOpen, setCmdOpen] = useState(false);
+
+  // Apply the URL hash after mount so SSR and client first render match
+  // (fixes React hydration error #418 for hash routes like #/system).
+  useEffect(() => { setView(parseHash()); }, []);
   const { t, locale, rtl } = useTranslation();
 
   useEffect(() => {
