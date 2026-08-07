@@ -1,54 +1,32 @@
-# AI Detector Suite for Forge
+# AI Detector Suite for Forge — HONEST capability statement
 
-A comprehensive AI-content detection suite — text, code, design, and images.
-A unique capability for a CI/CD platform.
+Detects SOME AI-generated content patterns. Has real limits. Read VALIDATION.md.
 
-## The 5 Detectors
+## What it CAN detect
 
-### 1. ai-detector.ts — Text
-Detects AI patterns in text/docs/markdown:
-- Lexical cliches (delve, tapestry, leverage)
-- Contrast constructions ('not just X, but Y')
-- Em-dash density
+Sloppy, cliche-laden AI output (unedited generation):
+- Text: AI cliches (delve, tapestry, leverage; Hebrew equivalents)
+- Code: debug leftovers, placeholders, TODO trails
+- CSS: glassmorphism, grayscale scaffold, gradient overuse
+- Images: AI-tool markers, missing EXIF, AI-typical dimensions
 
-### 2. code-ai-detector.ts — Code
-Detects AI patterns in source code:
-- Debug console leftovers
-- TODO/FIXME/HACK trails
-- Generic naming, placeholder values
+## What it CANNOT detect
 
-### 3. css-ai-detector.ts — Design
-Detects AI patterns in CSS:
-- Glassmorphism (backdrop-filter: blur)
-- Grayscale scaffold
-- Gradient overuse
-
-### 4. image-ai-detector.ts — Images
-Detects AI-generated images:
-- Missing EXIF camera data
-- AI-tool metadata markers (DALL-E, Midjourney, SD)
-- AI-typical dimensions
-
-### 5. audit.ts — Comprehensive Audit
-Combines all detectors. Analyzes every file in a project
-and produces an authenticity report.
+Natural-sounding AI output. Realistic AI text contains none of the detected
+cliches and scores 0.00. This is a hard ceiling of heuristic detection.
 
 ## Files
 
-- ai-detector.ts — text
+- ai-detector.ts — text (bilingual)
 - code-ai-detector.ts — code
 - css-ai-detector.ts — design
-- image-ai-detector.ts — images
-- audit.ts — comprehensive audit
-- README.md — this file
+- image-ai-detector.ts — images (byte analysis)
+- audit.ts — project-wide audit
+- test-suite.json — NON-adversarial baseline (cliche-heavy)
+- VALIDATION.md — HONEST results incl. adversarial 0/6
+- ROAST.md — self-critique
 
-## Integration
+## Use responsibly
 
-- API endpoint: POST /api/forge/ai-audit (in src/app/api/forge/ai-audit/)
-- Workflow template: examples/ai-audit-workflow/
-- UI component: examples/ai-audit-workflow/AIAuditPanel.tsx
-
-## Why This Matters
-
-Forge is the first CI/CD platform to offer AI-content detection.
-This differentiates it from every other tool in the market.
+Treat scores as 'flag for review', never as 'definitely AI'.
+Reliable detection requires ML, which this heuristic suite does not provide.
