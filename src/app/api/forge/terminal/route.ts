@@ -45,9 +45,12 @@ export async function POST(req: NextRequest): Promise<Response> {
     const { stdout, stderr } = await run(cmd, { cwd, timeout: 50000, maxBuffer: 8 * 1024 * 1024 });
     return Response.json({ ok: true, stdout, stderr, via: "local" });
   } catch (e: any) {
-    // if it's a real command failure (not missing child_process), report it
-    if (e && (e.stdout !== undefined || e.code !== "ERR_UNKNOWN_BUILTIN")) {
-      // fall through to mesh only if child_process truly unavailable
+    const msg = String(e?.message ?? e);
+    // Only fall back to mesh when child_process is truly unavailable (edge).
+    const unavailable = e?.stdout === undefined && /not implemented|unenv/i.test(msg);
+    if (!unavailable) {
+      // Real local command failure: return the actual output, don't bounce to mesh.
+      return Response.json({ ok: false, stdout: e?.stdout ?? "", stderr: e?.stderr ?? "", error: msg, via: "local" });
     }
   }
 
