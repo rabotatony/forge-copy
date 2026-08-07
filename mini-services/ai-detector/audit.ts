@@ -11,6 +11,7 @@
 import { detectAIText, type AIDetectionResult } from "./ai-detector";
 import { detectAICode, type CodeDetectionResult } from "./code-ai-detector";
 import { detectAICSS, type CSSDetectionResult } from "./css-ai-detector";
+import { detectAIImage, type ImageInfo, type ImageDetectionResult } from "./image-ai-detector";
 
 export interface ProjectAuditResult {
   overallScore: number;
@@ -21,7 +22,7 @@ export interface ProjectAuditResult {
 
 export interface FileResult {
   path: string;
-  type: "text" | "code" | "css";
+  type: "text" | "code" | "css" | "image";
   score: number;
   verdict: string;
   signals: string[];
@@ -33,11 +34,12 @@ export interface ProjectFile {
 }
 
 /** Determine file type from extension. */
-function getFileType(path: string): "text" | "code" | "css" | null {
+function getFileType(path: string): "text" | "code" | "css" | "image" | null {
   const ext = path.split(".").pop()?.toLowerCase();
   if (!ext) return null;
   if (["css", "scss", "sass", "less"].includes(ext)) return "css";
   if (["ts", "tsx", "js", "jsx", "py", "go", "rs", "java", "c", "cpp", "h"].includes(ext)) return "code";
+  if (["png", "jpg", "jpeg", "gif", "webp", "svg"].includes(ext)) return "image";
   if (["md", "txt", "rst"].includes(ext)) return "text";
   return null;
 }
