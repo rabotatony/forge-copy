@@ -54,6 +54,12 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased bg-background text-foreground`}
       >
+        <script
+          dangerouslySetInnerHTML={{
+            __html:
+              "var __name=function(t,v){try{Object.defineProperty(t,'name',{value:v,configurable:true});}catch(e){}return t;};",
+          }}
+        />
         <ForgeProviders>{children}</ForgeProviders>
       </body>
     </html>
