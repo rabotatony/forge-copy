@@ -3,11 +3,13 @@
 // ============================================================
 // POST /api/forge/auth/logout
 // ============================================================
+import { NextResponse } from "next/server";
+
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 export async function POST(): Promise<Response> {
-  const res = Response.json({ ok: true });
+  const res = NextResponse.json({ ok: true });
   res.cookies.set("forge_session", "", {
     httpOnly: true,
     sameSite: "lax",
