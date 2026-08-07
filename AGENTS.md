@@ -101,3 +101,21 @@ If you cannot verify rendering, SAY SO explicitly instead of claiming success.
 - Prefer the existing design tokens and components over inventing new ones.
 - Prefer removing over adding (focus over comprehensiveness).
 - If a change is risky, make it behind a fallback so the page never goes blank.
+
+
+## 10. MANDATORY pre-push self-check (do this before EVERY push)
+
+Run these locally and fix any failure BEFORE pushing. Do not push broken work.
+
+1. Type-check:      `bun x tsc --noEmit`   (or `npx tsc --noEmit`)
+   - Catches broken imports / missing exports (the blank-page cause).
+2. AI-pattern check on every file you changed:
+                     `node scripts/deai-check.mjs <file>`
+   - If score >= 0.4, reduce AI cliches/patterns and re-check until lower.
+3. Render sanity:   confirm the page/component you touched actually shows
+   content. If you can't run it, say so explicitly in the PR description.
+4. Colors:          confirm text/background contrast (no light-on-light).
+5. Fallbacks:       confirm the component renders something meaningful when
+   its data is empty/null.
+
+If any step fails and you cannot fix it, do NOT push silently — flag it.
