@@ -40,11 +40,16 @@ export async function GET(
       }
     }
 
-    const artifacts = await db.artifact.findMany({
-      where: { projectId: id },
-      orderBy: { createdAt: "desc" },
-      take: 200,
-    });
+    let artifacts = [];
+    try {
+      artifacts = await db.artifact.findMany({
+        where: { projectId: id },
+        orderBy: { createdAt: "desc" },
+        take: 200,
+      });
+    } catch {
+      artifacts = [];
+    }
     return ok(artifacts);
   } catch (err) {
     return serverError(err);
