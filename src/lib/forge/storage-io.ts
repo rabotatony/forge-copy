@@ -65,6 +65,21 @@ export async function writeStorageFile(absOrRel: string, data: Buffer | string):
   fs.writeFileSync(abs, buf);
 }
 
+export async function writeStorageStream(absOrRel: string, stream: ReadableStream): Promise<void> {
+  const rel = toRel(absOrRel);
+  if (!isWorkersRuntime()) {
+    // local fs: collect stream then write
+    const chunks: Uint8Array[] = [];
+    const reader = stream.getReader();
+    for (;;) { const { done, value } = await reader.read(); if (done) break; if (value) chunks.push(value); }
+    const fs = await import("node:fs"); const path = await import("node:path");
+    fs.mkdirSync(path.dirname(absOrRel), { recursive: true });
+    fs.writeFileSync(absOrRel, Buffer.concat(chunks as any));
+    return;
+  }
+  await getR2().put(rel, stream);
+}
+
 export async function deleteStorageFile(absOrRel: string): Promise<void> {
   const rel = toRel(absOrRel);
   if (isWorkers()) {
