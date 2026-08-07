@@ -65,7 +65,7 @@ export async function writeStorageFile(absOrRel: string, data: Buffer | string):
   fs.writeFileSync(abs, buf);
 }
 
-export async function writeStorageStream(absOrRel: string, stream: ReadableStream): Promise<void> {
+export async function writeStorageStream(absOrRel: string, stream: ReadableStream, knownLength?: number): Promise<void> {
   const rel = toRel(absOrRel);
   if (!isWorkers()) {
     // local fs: collect stream then write
@@ -76,7 +76,17 @@ export async function writeStorageStream(absOrRel: string, stream: ReadableStrea
     fs.writeFileSync(absOrRel, Buffer.concat(chunks as any));
     return;
   }
-  await getR2().put(rel, stream);
+  // R2 needs a known-length stream. Use FixedLengthStream when we know the size.
+  const FLS = (globalThis as any).FixedLengthStream;
+  if (knownLength && knownLength > 0 && typeof FLS === "function") {
+    const fls = new FLS(knownLength);
+    await (stream as any).pipeTo(fls.writable);
+    await getR2().put(rel, fls.readable);
+    return;
+  }
+  // fallback: buffer (only when length unknown)
+  const buf = await new Response(stream as any).arrayBuffer();
+  await getR2().put(rel, buf);
 }
 
 export async function deleteStorageFile(absOrRel: string): Promise<void> {
