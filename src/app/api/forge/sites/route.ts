@@ -6,7 +6,9 @@
 // served by the separate forge-sites worker (no main-worker bloat).
 // ============================================================
 import type { NextRequest } from "next/server";
+import * as path from "node:path";
 import { writeStorageFile } from "@/lib/forge/storage-io";
+import { PATHS } from "@/lib/forge/storage";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -21,7 +23,8 @@ export async function POST(req: NextRequest): Promise<Response> {
   if (names.length === 0) return Response.json({ error: "files required" }, { status: 400 });
   const siteId = Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
   for (const p of names) {
-    await writeStorageFile(`sites/${siteId}/${p.replace(/^\//, "")}`, String(files[p]));
+    const clean = p.replace(/^\//, "");
+    await writeStorageFile(path.join(PATHS.root, "sites", siteId, clean), String(files[p]));
   }
   return Response.json({
     siteId,
