@@ -12,7 +12,7 @@ import path from "node:path";
 import zlib from "node:zlib";
 import { db } from "@/lib/db";
 import { ok, created, fail, serverError } from "@/lib/forge/response";
-import { writeStorageFile } from "@/lib/forge/storage-io";
+import { writeStorageFile, writeStorageStream } from "@/lib/forge/storage-io";
 import { extractDir, sourceZipPath } from "@/lib/forge/storage";
 
 export const dynamic = "force-dynamic";
