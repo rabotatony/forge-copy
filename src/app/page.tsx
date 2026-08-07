@@ -93,6 +93,22 @@ export default function ForgePage() {
 
   useEffect(() => { if (typeof window !== "undefined") { const hash = viewToHash(view); if (window.location.hash !== hash) window.history.pushState(null, "", hash || "#/"); } }, [view]);
   useEffect(() => { if (typeof window === "undefined") return; const onPop = () => setView(parseHash()); window.addEventListener("popstate", onPop); return () => window.removeEventListener("popstate", onPop); }, []);
+
+  // Wire the dashboard "Quick Actions" buttons (upload / marketplace / settings).
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onQuick = (e: Event) => {
+      const action = (e as CustomEvent).detail?.action;
+      if (action === "settings") setView({ kind: "surface", surface: "system" });
+      else if (action === "marketplace") setView({ kind: "surface", surface: "library" });
+      else if (action === "upload") {
+        setView({ kind: "surface", surface: "projects" });
+        setTimeout(() => window.dispatchEvent(new CustomEvent("forge:open-upload")), 120);
+      }
+    };
+    window.addEventListener("forge:quick-action", onQuick);
+    return () => window.removeEventListener("forge:quick-action", onQuick);
+  }, []);
   const openProject = useCallback((projectId: string) => {
     setView({ kind: "project", projectId });
     if (typeof window !== "undefined") window.scrollTo({ top: 0 });
