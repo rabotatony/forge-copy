@@ -52,7 +52,7 @@ export async function POST(req: NextRequest): Promise<Response> {
     const body = await req.json() as {
       name: string;
       projectId?: string;
-      scopes?: string;
+      scopes?: string | string[];
       expiresInSeconds?: number;
     };
 
@@ -60,7 +60,7 @@ export async function POST(req: NextRequest): Promise<Response> {
       return Response.json({ error: 'name is required' }, { status: 400 });
     }
 
-    const scopes = body.scopes ?? 'read';
+    const scopes = Array.isArray(body.scopes) ? body.scopes.join(",") : (body.scopes ?? 'read');
     const plaintext = generateToken();
     const tokenHash = hashToken(plaintext);
     const prefix = plaintext.slice(0, 11) + '…';
