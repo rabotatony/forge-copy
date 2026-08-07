@@ -5,6 +5,7 @@
 //   body: { token: "fk_xxx" }   (or Authorization: Bearer fk_xxx)
 //   -> 200 { ok, token: {...} } + Set-Cookie: forge_session
 // ============================================================
+import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { authenticate } from "@/lib/forge/auth";
 
@@ -35,7 +36,7 @@ export async function POST(request: NextRequest): Promise<Response> {
     const h = reqToAuth.headers.get("authorization");
     if (h) raw = h.replace(/^Bearer\s+/i, "").trim();
 
-    const res = Response.json({ ok: true, token: auth.token });
+    const res = NextResponse.json({ ok: true, token: auth.token });
     if (raw) {
       res.cookies.set("forge_session", raw, {
         httpOnly: true,
