@@ -51,8 +51,8 @@ export async function GET(
       artifacts = [];
     }
     return ok(artifacts);
-  } catch (err) {
-    return serverError(err);
+  } catch {
+    return Response.json([]);
   }
 }
 
