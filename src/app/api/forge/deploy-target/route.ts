@@ -61,5 +61,30 @@ export async function POST(req: NextRequest): Promise<Response> {
     });
   }
 
+
+  if (provider === "render") {
+    // Render: create a web service from a repo (needs render token).
+    const r2 = await fetch("https://api.render.com/v1/services", {
+      method: "POST",
+      headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "web", name: String(b.app ?? "forge"), plan: "free",
+        runtime: "docker", repo: String(b.repo ?? ""), dockerfilePath: String(b.dockerfile ?? "./Dockerfile"),
+      }),
+    });
+    const t = await r2.text();
+    return Response.json({ provider, status: r2.status, body: t.slice(0, 400) });
+  }
+
+  if (provider === "docker") {
+    // Generic Docker host: return the run command to execute on any host.
+    const image = String(b.image ?? "ghcr.io/rabotatony/forge:latest");
+    return Response.json({
+      provider,
+      command: `docker run -d -p 3000:3000 -e PORT=3000 -e DATABASE_URL=file:/data/forge.db -v forge-data:/data ${image}`,
+      note: "Run this on any Docker host to get a sovereign Forge.",
+    });
+  }
+
   return Response.json({ error: "unknown provider: " + provider }, { status: 400 });
 }
