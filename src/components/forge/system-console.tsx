@@ -1,30 +1,22 @@
 "use client";
-
+// ============================================================
+// Forge Control Center — one coherent home for every capability.
+// Capabilities are grouped by purpose (not a flat wall of tabs),
+// and each reuses an existing panel — no duplicates.
+// ============================================================
 import { useState, lazy, Suspense } from "react";
 import {
-  Settings as SettingsIcon,
-  Key,
-  Terminal as TerminalIcon,
-  FlaskConical,
-  TerminalSquare,
-  Eye,
-  Rocket,
-  Network,
-  Database,
-  Activity,
-  Gauge,
-  Cpu,
+  LayoutDashboard, TerminalSquare, Eye, Rocket, Sparkles, Clock, Settings,
 } from "lucide-react";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Loading } from "./ui";
 
-// Lazy-load heavy components.
+// Existing rich panels.
 const GlobalSettings = lazy(() => import("./global-settings").then((m) => ({ default: m.GlobalSettings })));
 const ApiTokensPanel = lazy(() => import("./api-tokens-panel").then((m) => ({ default: m.ApiTokensPanel })));
 const SystemLogsViewer = lazy(() => import("./system-logs-viewer").then((m) => ({ default: m.SystemLogsViewer })));
 const ExperimentsLab = lazy(() => import("./experiments-lab").then((m) => ({ default: m.ExperimentsLab })));
-
-// New capability panels.
+const AIAssistant = lazy(() => import("./ai-assistant").then((m) => ({ default: m.AIAssistant })));
+// My capability panels (terminal/observer/sites/mesh/memory/telemetry/metrics/caps).
 const TerminalPanel = lazy(() => import("./forge-control-panels").then((m) => ({ default: m.TerminalPanel })));
 const ObserverPanel = lazy(() => import("./forge-control-panels").then((m) => ({ default: m.ObserverPanel })));
 const SitesPanel = lazy(() => import("./forge-control-panels").then((m) => ({ default: m.SitesPanel })));
@@ -33,67 +25,71 @@ const MemoryPanel = lazy(() => import("./forge-control-panels").then((m) => ({ d
 const TelemetryPanel = lazy(() => import("./forge-control-panels").then((m) => ({ default: m.TelemetryPanel })));
 const MetricsPanel = lazy(() => import("./forge-control-panels").then((m) => ({ default: m.MetricsPanel })));
 const CapabilitiesPanel = lazy(() => import("./forge-control-panels").then((m) => ({ default: m.CapabilitiesPanel })));
+// New purpose-built panels.
+const StatsPanel = lazy(() => import("./capability-panels").then((m) => ({ default: m.StatsPanel })));
+const AuditLogPanel = lazy(() => import("./capability-panels").then((m) => ({ default: m.AuditLogPanel })));
+const SchedulerPanel = lazy(() => import("./capability-panels").then((m) => ({ default: m.SchedulerPanel })));
+const SearchPanel = lazy(() => import("./capability-panels").then((m) => ({ default: m.SearchPanel })));
+const AIAuditPanel = lazy(() => import("./capability-panels").then((m) => ({ default: m.AIAuditPanel })));
 
-function T(props: { value: string; icon: any; label: string }) {
-  return (
-    <TabsTrigger value={props.value} className="gap-1.5">
-      <props.icon className="size-3.5" />
-      <span className="hidden sm:inline">{props.label}</span>
-    </TabsTrigger>
-  );
-}
-function C(props: { value: string; label: string; children: React.ReactNode }) {
-  return (
-    <TabsContent value={props.value} className="mt-4">
-      <Suspense fallback={<Loading label={`Loading ${props.label}…`} />}>{props.children}</Suspense>
-    </TabsContent>
-  );
-}
+const CATS = [
+  { id: "overview", label: "Overview", icon: LayoutDashboard, panels: [["stats", StatsPanel], ["metrics", MetricsPanel], ["caps", CapabilitiesPanel]] },
+  { id: "execute", label: "Execute", icon: TerminalSquare, panels: [["terminal", TerminalPanel], ["mesh", MeshPanel], ["memory", MemoryPanel]] },
+  { id: "observe", label: "Observe", icon: Eye, panels: [["observer", ObserverPanel], ["telemetry", TelemetryPanel], ["logs", SystemLogsViewer]] },
+  { id: "deploy", label: "Deploy", icon: Rocket, panels: [["sites", SitesPanel]] },
+  { id: "ai", label: "AI", icon: Sparkles, panels: [["assistant", AIAssistant], ["audit", AIAuditPanel], ["lab", ExperimentsLab]] },
+  { id: "automate", label: "Automate", icon: Clock, panels: [["scheduler", SchedulerPanel]] },
+  { id: "manage", label: "Manage", icon: Settings, panels: [["settings", GlobalSettings], ["tokens", ApiTokensPanel], ["auditlog", AuditLogPanel], ["search", SearchPanel]] },
+] as const;
 
 export function SystemConsole() {
-  const [tab, setTab] = useState<string>("settings");
+  const [cat, setCat] = useState<string>("overview");
+  const active = CATS.find((c) => c.id === cat) ?? CATS[0];
   return (
-    <section className="mx-auto w-full max-w-6xl space-y-6">
+    <section className="mx-auto w-full max-w-6xl space-y-5">
       <div className="space-y-1">
         <h2 className="flex items-center gap-2 text-2xl font-semibold tracking-tight">
-          <SettingsIcon className="size-6 text-emerald-600 dark:text-emerald-400" />
-          System & Control Center
+          <LayoutDashboard className="size-6 text-emerald-600 dark:text-emerald-400" />
+          Control Center
         </h2>
         <p className="text-sm text-muted-foreground">
-          Settings and tokens, plus Forge's live powers: terminal, observer (AI eyes),
-          sites (unique links), mesh compute, memory, telemetry, metrics, capabilities.
+          Every Forge capability in one place, grouped by what it does.
         </p>
       </div>
 
-      <Tabs value={tab} onValueChange={setTab}>
-        <TabsList className="flex w-full flex-wrap justify-start gap-1 h-auto py-1">
-          <T value="settings" icon={SettingsIcon} label="Settings" />
-          <T value="tokens" icon={Key} label="Tokens" />
-          <T value="terminal" icon={TerminalSquare} label="Terminal" />
-          <T value="observer" icon={Eye} label="Observer" />
-          <T value="sites" icon={Rocket} label="Sites" />
-          <T value="mesh" icon={Network} label="Mesh" />
-          <T value="memory" icon={Database} label="Memory" />
-          <T value="telemetry" icon={Activity} label="Telemetry" />
-          <T value="metrics" icon={Gauge} label="Metrics" />
-          <T value="caps" icon={Cpu} label="Capabilities" />
-          <T value="logs" icon={TerminalIcon} label="Logs" />
-          <T value="lab" icon={FlaskConical} label="Lab" />
-        </TabsList>
+      {/* Category nav */}
+      <div className="flex flex-wrap gap-2">
+        {CATS.map((c) => {
+          const Icon = c.icon;
+          const on = c.id === cat;
+          return (
+            <button
+              key={c.id}
+              onClick={() => setCat(c.id)}
+              className={
+                "flex items-center gap-2 rounded-md border px-3 py-2 text-sm transition-colors " +
+                (on
+                  ? "border-emerald-600 bg-emerald-600/15 text-emerald-600 dark:text-emerald-400"
+                  : "border-border text-muted-foreground hover:bg-muted")
+              }
+            >
+              <Icon className="size-4" />
+              {c.label}
+              <span className="text-[10px] opacity-60">{c.panels.length}</span>
+            </button>
+          );
+        })}
+      </div>
 
-        <C value="settings" label="settings"><GlobalSettings /></C>
-        <C value="tokens" label="API tokens"><ApiTokensPanel /></C>
-        <C value="terminal" label="terminal"><TerminalPanel /></C>
-        <C value="observer" label="observer"><ObserverPanel /></C>
-        <C value="sites" label="sites"><SitesPanel /></C>
-        <C value="mesh" label="mesh"><MeshPanel /></C>
-        <C value="memory" label="memory"><MemoryPanel /></C>
-        <C value="telemetry" label="telemetry"><TelemetryPanel /></C>
-        <C value="metrics" label="metrics"><MetricsPanel /></C>
-        <C value="caps" label="capabilities"><CapabilitiesPanel /></C>
-        <C value="logs" label="logs"><SystemLogsViewer /></C>
-        <C value="lab" label="experiments"><ExperimentsLab /></C>
-      </Tabs>
+      {/* Panels for the active category */}
+      <div className="space-y-4">
+        {active.panels.map(([key, Comp]) => (
+          <Suspense key={key} fallback={<Loading label={`Loading ${active.label}…`} />}>
+            {/* @ts-expect-error lazy component */}
+            <Comp />
+          </Suspense>
+        ))}
+      </div>
     </section>
   );
 }
