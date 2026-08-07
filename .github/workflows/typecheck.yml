@@ -1,0 +1,33 @@
+name: typecheck
+
+# Catches broken imports / missing exports / type errors BEFORE deploy.
+# This prevents the "blank page" failure class (a component importing a
+# non-existent export renders nothing in production).
+# Non-blocking (continue-on-error) so it informs without halting work.
+
+on:
+  pull_request:
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Type-check (tsc --noEmit)
+        run: bun x tsc --noEmit
+
+      - name: Note
+        if: failure()
+        run: |
+          echo "::warning::Type errors found. A component with a broken import"
+          echo "::warning::renders NOTHING in production (blank page). Fix before merging."
