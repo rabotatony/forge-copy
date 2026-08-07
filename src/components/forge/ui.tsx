@@ -317,3 +317,21 @@ export function CategoryChip({
     </button>
   );
 }
+
+
+import { Component as _SafeComp, type ReactNode as _SafeNode } from "react";
+interface _SafeState { error: Error | null }
+export class Safe extends _SafeComp<{ children: _SafeNode; label?: string }, _SafeState> {
+  state: _SafeState = { error: null };
+  static getDerivedStateFromError(error: Error): _SafeState { return { error }; }
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-700 dark:text-amber-300">
+          {this.props.label ?? "This panel"} hit a snag: {String(this.state.error?.message ?? this.state.error)}
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
