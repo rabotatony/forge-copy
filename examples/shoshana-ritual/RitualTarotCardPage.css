@@ -1,0 +1,92 @@
+/* RitualTarotCardPage.css - ONE card, deeply, with space */
+
+.ritual-card-page {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: var(--surface-0, #1a1612);
+  color: var(--ink, #e8dfc8);
+  padding: 8vh 2rem;
+}
+
+.ritual-card-page > section {
+  width: 100%;
+  max-width: 560px;
+  text-align: center;
+  margin-bottom: 8vh;
+}
+
+/* THE CARD IMAGE */
+.rc-image {
+  margin-bottom: 6vh;
+}
+
+/* THE NAME */
+.rc-letter {
+  font-size: 3rem;
+  opacity: 0.4;
+  margin-bottom: 1rem;
+}
+
+.rc-hebrew-name {
+  font-size: 2.5rem;
+  letter-spacing: 0.15em;
+  margin-bottom: 0.5rem;
+}
+
+.rc-english-name {
+  font-size: 1rem;
+  opacity: 0.5;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+}
+
+/* THE KEYWORD */
+.rc-keyword-text {
+  font-size: 1.4rem;
+  opacity: 0.8;
+  letter-spacing: 0.3em;
+  border-top: 1px solid rgba(232, 223, 200, 0.15);
+  border-bottom: 1px solid rgba(232, 223, 200, 0.15);
+  padding: 2rem 0;
+}
+
+/* THE MEANING */
+.rc-pshat, .rc-remez, .rc-description {
+  font-size: 1.1rem;
+  line-height: 2.2;
+  opacity: 0.85;
+  margin-bottom: 2rem;
+}
+
+.rc-remez {
+  opacity: 0.7;
+  font-style: italic;
+}
+
+.rc-description {
+  opacity: 0.75;
+}
+
+/* THE PRACTICE */
+.rc-practice-label {
+  font-size: 0.85rem;
+  opacity: 0.5;
+  letter-spacing: 0.2em;
+  margin-bottom: 1rem;
+}
+
+.rc-practice-text {
+  font-size: 1.05rem;
+  line-height: 2;
+  opacity: 0.8;
+}
+
+.ritual-card-loading {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.5;
+}
