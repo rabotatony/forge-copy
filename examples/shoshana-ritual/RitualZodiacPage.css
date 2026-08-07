@@ -1,0 +1,92 @@
+/* RitualZodiacPage.css - ONE sign, deeply, with space */
+
+.ritual-zodiac-page {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: var(--surface-0, #1a1612);
+  color: var(--ink, #e8dfc8);
+  padding: 8vh 2rem;
+}
+
+.ritual-zodiac-page > section {
+  width: 100%;
+  max-width: 560px;
+  text-align: center;
+  margin-bottom: 7vh;
+}
+
+/* THE GLYPH */
+.rz-glyph-symbol {
+  font-size: 5rem;
+  opacity: 0.7;
+}
+
+/* THE NAME */
+.rz-hebrew-name {
+  font-size: 2.5rem;
+  letter-spacing: 0.15em;
+  margin-bottom: 0.5rem;
+}
+
+.rz-latin-name {
+  font-size: 1rem;
+  opacity: 0.5;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+}
+
+/* THE KEYWORD */
+.rz-keyword-text {
+  font-size: 1.4rem;
+  opacity: 0.8;
+  letter-spacing: 0.3em;
+  border-top: 1px solid rgba(232, 223, 200, 0.15);
+  border-bottom: 1px solid rgba(232, 223, 200, 0.15);
+  padding: 2rem 0;
+}
+
+/* THE ESSENCE */
+.rz-essence-line {
+  font-size: 1rem;
+  opacity: 0.6;
+  line-height: 2;
+  letter-spacing: 0.1em;
+}
+
+/* THE MEANING */
+.rz-description {
+  font-size: 1.1rem;
+  line-height: 2.2;
+  opacity: 0.85;
+  text-align: right;
+}
+
+/* ARCHETYPE, TEACHING, PRACTICE */
+.rz-archetype-label, .rz-teaching-label, .rz-practice-label {
+  font-size: 0.85rem;
+  opacity: 0.5;
+  letter-spacing: 0.2em;
+  margin-bottom: 1rem;
+}
+
+.rz-archetype-text {
+  font-size: 1.2rem;
+  opacity: 0.8;
+  font-style: italic;
+}
+
+.rz-teaching-text, .rz-practice-text {
+  font-size: 1.05rem;
+  line-height: 2;
+  opacity: 0.8;
+}
+
+.ritual-zodiac-loading {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.5;
+}
