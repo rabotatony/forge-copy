@@ -31,9 +31,13 @@ export async function GET(
 
     const source = request.nextUrl.searchParams.get("source");
     if (source === "workflow") {
-      const runId = request.nextUrl.searchParams.get("runId");
-      const artifacts = await listWorkflowArtifacts(id, runId ? Number(runId) : undefined);
-      return ok({ projectRepo: project.repoUrl ?? null, artifacts });
+      try {
+        const runId = request.nextUrl.searchParams.get("runId");
+        const artifacts = await listWorkflowArtifacts(id, runId ? Number(runId) : undefined);
+        return ok({ projectRepo: project.repoUrl ?? null, artifacts });
+      } catch {
+        return ok({ projectRepo: project.repoUrl ?? null, artifacts: [] });
+      }
     }
 
     const artifacts = await db.artifact.findMany({
