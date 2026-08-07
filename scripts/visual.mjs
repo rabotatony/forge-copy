@@ -17,7 +17,9 @@ function ascii(path){
   for(let y=0;y<H;y++){let line="";
    for(let x=0;x<W;x++){let sum=0,cnt=0;
     for(let dy=0;dy<sy;dy+=2)for(let dx=0;dx<sx;dx+=2){const i=((y*sy+dy)*p.width+(x*sx+dx))*4;sum+=0.2126*p.data[i]+0.7152*p.data[i+1]+0.0722*p.data[i+2];cnt++;}
-    const l=sum/cnt/255;line+=chars[Math.min(chars.length-1,Math.floor(l*chars.length))];}
+    // edge-energy: deviation within cell -> shows structure on dark OR light
+    let mn=255,mx=0;for(let dy=0;dy<sy;dy+=2)for(let dx=0;dx<sx;dx+=2){const i=((y*sy+dy)*p.width+(x*sx+dx))*4;const l=0.2126*p.data[i]+0.7152*p.data[i+1]+0.0722*p.data[i+2];if(l<mn)mn=l;if(l>mx)mx=l;}
+    const e=(mx-mn)/255;line+=chars[Math.min(chars.length-1,Math.floor(e*chars.length))];}
    rows.push(line);}
   return rows.join("\n");
  }catch(e){return "ascii-err:"+e.message;}
