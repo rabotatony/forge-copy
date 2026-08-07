@@ -1,38 +1,35 @@
 import { chromium } from "playwright";
-import { mkdirSync } from "fs";
+import { mkdirSync, readFileSync } from "fs";
+import png from "pngjs";
 const BASE=process.env.BASE||"https://roses-cj2.pages.dev";
 const out=process.env.OUT||"visual";
 mkdirSync(out,{recursive:true});
-const routes=["","hana","hakara","shkila","haamaka","edut","kria","hachlafa","tirgum","ktiva","tikun","hatima","zekher"];
+const routes=["","hana","hakara","shkila"];
 const browser=await chromium.launch();
 const page=await browser.newPage({viewport:{width:1280,height:800}});
-const report=[];const errors=[];
-page.on("console",m=>{if(m.type()==="error")errors.push("console:"+m.text().slice(0,100));});
-page.on("pageerror",e=>errors.push("pageerror:"+String(e).slice(0,100)));
-function vis(sel){return page.evaluate(s=>{const e=document.querySelector(s);if(!e)return null;
- const cs=getComputedStyle(e);const r=e.getBoundingClientRect();
- return {op:parseFloat(cs.opacity),w:Math.round(r.width),h:Math.round(r.height)};},sel);}
-for(const r of routes){
- const url=BASE+"/"+r;
- await page.goto(url,{waitUntil:"load",timeout:20000}).catch(()=>{});
- await page.waitForTimeout(4200); // let auto-sequence finish
- const primary=await vis(".idea,.piece,.claim,.say,#idea,.line");
- const secondary=await vis(".chart,.secondary,.piles,.tension,.strata");
- const data=await vis(".data,.tertiary");
- const next=await vis(".next,.nxt,#hemshech");
- const hscroll=await page.evaluate(()=>document.documentElement.scrollWidth>document.documentElement.clientWidth);
- report.push({route:r||"/",primary,secondary,data,next,hscroll});
- await page.screenshot({path:out+"/d-"+(r||"home")+".png"});
+const errors=[];
+page.on("pageerror",e=>errors.push("pageerror:"+String(e).slice(0,80)));
+function ascii(path){
+ try{
+  const p=png.PNG.sync.read(readFileSync(path));
+  const W=72,H=34;const sx=Math.floor(p.width/W),sy=Math.floor(p.height/H);
+  const chars=" .:-=+*#%@";let rows=[];
+  for(let y=0;y<H;y++){let line="";
+   for(let x=0;x<W;x++){let sum=0,cnt=0;
+    for(let dy=0;dy<sy;dy+=2)for(let dx=0;dx<sx;dx+=2){const i=((y*sy+dy)*p.width+(x*sx+dx))*4;sum+=0.2126*p.data[i]+0.7152*p.data[i+1]+0.0722*p.data[i+2];cnt++;}
+    const l=sum/cnt/255;line+=chars[Math.min(chars.length-1,Math.floor(l*chars.length))];}
+   rows.push(line);}
+  return rows.join("\n");
+ }catch(e){return "ascii-err:"+e.message;}
 }
-// mobile spot check
-await page.setViewportSize({width:390,height:844});
-for(const r of ["","hana"]){
- await page.goto(BASE+"/"+r,{waitUntil:"load"}).catch(()=>{});
- await page.waitForTimeout(3500);
- const primary=await vis(".idea,.piece,#idea");
- const hscroll=await page.evaluate(()=>document.documentElement.scrollWidth>document.documentElement.clientWidth);
- report.push({route:"m:"+(r||"/"),primary,hscroll});
- await page.screenshot({path:out+"/m-"+(r||"home")+".png"});
+let report=[];
+for(const r of routes){
+ await page.goto(BASE+"/"+r,{waitUntil:"load",timeout:20000}).catch(()=>{});
+ await page.waitForTimeout(4200);
+ const f=out+"/d-"+(r||"home")+".png";
+ await page.screenshot({path:f});
+ report.push({route:r||"/",ascii:ascii(f)});
 }
 await browser.close();
-console.log("VISUAL_REPORT "+JSON.stringify({errors:errors.slice(0,10),report}));
+for(const rt of report){console.log("ASCII_"+rt.route+"\n"+rt.ascii+"\nEND_"+rt.route);}
+console.log("ERR "+JSON.stringify(errors.slice(0,5)));
