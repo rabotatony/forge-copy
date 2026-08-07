@@ -52,7 +52,7 @@ export async function POST(req: NextRequest): Promise<Response> {
     const archivePath = isZip
       ? sourceZipPath(project.id)
       : sourceZipPath(project.id).replace(/source\.zip$/, "source.tar.gz");
-    await writeStorageStream(archivePath, res.body as unknown as ReadableStream);
+    await writeStorageStream(archivePath, res.body as unknown as ReadableStream, Number(res.headers.get('content-length') || 0));
 
     return Response.json({
       id: project.id, name, sourceUrl: url,
