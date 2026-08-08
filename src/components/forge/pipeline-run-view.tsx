@@ -79,7 +79,7 @@ export function PipelineRunView({
   const isRunning = pr.status === "running";
 
   return (
-    <section className="mx-auto w-full max-w-6xl space-y-6">
+    <section className="forge-reveal mx-auto w-full max-w-6xl space-y-6">
       <div>
         <Button variant="ghost" size="sm" onClick={onBack} className="mb-3 -ml-2" aria-label="Back to pipelines">
           <ArrowLeft className="size-4" aria-hidden /> Back to pipelines
