@@ -176,7 +176,7 @@ export function GlobalDashboard({ onOpenProject }: { onOpenProject?: (id: string
         : "danger";
 
   return (
-    <div className="space-y-6">
+    <div className="forge-reveal space-y-6">
       {/* Header */}
       <header className="flex items-center gap-3">
         <div className="flex size-9 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
@@ -191,7 +191,7 @@ export function GlobalDashboard({ onOpenProject }: { onOpenProject?: (id: string
       </header>
 
       {/* Stat cards */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+      <div className="forge-reveal forge-d2 grid grid-cols-2 gap-3 sm:grid-cols-4">
         <StatCard
           icon={FolderGit2}
           label="Total Projects"
@@ -239,7 +239,7 @@ export function GlobalDashboard({ onOpenProject }: { onOpenProject?: (id: string
       </div>
 
       {/* Recent activity + top workflows */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+      <div className="forge-reveal forge-d3 grid grid-cols-1 gap-4 lg:grid-cols-2">
         {/* Recent activity feed */}
         <Card>
           <CardHeader className="pb-3">
