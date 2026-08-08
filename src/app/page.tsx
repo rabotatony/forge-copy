@@ -29,6 +29,7 @@ const RunView = dynamic(() => import("@/components/forge/run-view").then((m) => 
 const PipelineRunView = dynamic(() => import("@/components/forge/pipeline-run-view").then((m) => m.PipelineRunView), { ssr: false });
 const LibraryView = dynamic(() => import("@/components/forge/library").then((m) => m.LibraryView), { ssr: false });
 const SystemConsole = dynamic(() => import("@/components/forge/system-console").then((m) => m.SystemConsole), { ssr: false });
+const ForgeHero = dynamic(() => import("@/components/forge/forge-hero").then((m) => m.ForgeHero), { ssr: false });
 
 // ---------------------------------------------------------------------------
 // View model — 3 surfaces (+ Control Center categories) + project sub-views
@@ -247,6 +248,8 @@ export default function ForgePage() {
           <ErrorBoundary label="Forge main content">
             {view.kind === "surface" && view.surface === "projects" && (
               <div className="mx-auto w-full max-w-6xl space-y-6">
+                <SectionErrorBoundary label="Welcome"><ForgeHero onOpenControlCenter={() => goToSurface("system", "overview")} /></SectionErrorBoundary>
+                <div id="projects" className="scroll-mt-20" />
                 <SectionErrorBoundary label="Dashboard"><GlobalDashboard onOpenProject={openProject} /></SectionErrorBoundary>
                 <SectionErrorBoundary label="Projects"><ProjectList onOpenProject={openProject} onUploaded={openProject} /></SectionErrorBoundary>
               </div>
