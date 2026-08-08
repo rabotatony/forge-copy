@@ -447,7 +447,7 @@ function StatCard({
   };
 
   return (
-    <Card>
+    <Card className="transition-all duration-300 hover:-translate-y-0.5 hover:border-emerald-500/30 hover:shadow-[0_8px_24px_-8px_rgba(16,185,129,0.25)]">
       <CardContent className="flex items-center gap-3 p-4">
         <div
           className={cn(
