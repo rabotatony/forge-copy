@@ -36,6 +36,7 @@ const ForgeHero = dynamic(() => import("@/components/forge/forge-hero").then((m)
 // ---------------------------------------------------------------------------
 type Surface = "projects" | "library" | "system";
 type View =
+  | { kind: "landing" }
   | { kind: "surface"; surface: Surface; category?: string }
   | { kind: "project"; projectId: string }
   | { kind: "run"; projectId: string; runId: string }
@@ -45,7 +46,7 @@ function parseHash(): View {
   if (typeof window === "undefined") return { kind: "surface", surface: "projects" };
   const hash = window.location.hash.replace(/^#\/?/, "");
   const parts = hash.split("/").filter(Boolean);
-  if (parts.length === 0) return { kind: "surface", surface: "projects" };
+  if (parts.length === 0) return { kind: "landing" };
   if (parts[0] === "library") return { kind: "surface", surface: "library" };
   if (parts[0] === "system") return { kind: "surface", surface: "system", category: parts[1] };
   if (parts[0] === "projects" && parts[1]) {
@@ -58,6 +59,7 @@ function parseHash(): View {
 }
 function viewToHash(view: View) {
   switch (view.kind) {
+    case "landing": return "#/";
     case "surface":
       if (view.surface === "system" && view.category) return "#/system/" + view.category;
       return "#/" + (view.surface === "projects" ? "" : view.surface);
@@ -91,7 +93,7 @@ const navBtn = (active: boolean) =>
     : "text-muted-foreground hover:bg-accent hover:text-foreground");
 
 export default function ForgePage() {
-  const [view, setView] = useState<View>({ kind: "surface", surface: "projects" });
+  const [view, setView] = useState<View>({ kind: "landing" });
   const [ready, setReady] = useState(false);
   const [cmdOpen, setCmdOpen] = useState(false);
   const { t, locale, rtl } = useTranslation();
@@ -170,7 +172,17 @@ export default function ForgePage() {
   }, []);
 
   const activeSurface: Surface = view.kind === "surface" ? view.surface : "projects";
+  const isLanding = view.kind === "landing";
   const activeCategory = view.kind === "surface" && view.surface === "system" ? view.category : undefined;
+
+  // ===== Landing page — its own immersive world =====
+  if (isLanding) {
+    return (
+      <ErrorBoundary label="Forge landing">
+        <ForgeHero onEnterApp={() => goToSurface("projects")} onOpenControlCenter={() => goToSurface("system", "overview")} />
+      </ErrorBoundary>
+    );
+  }
 
   return (
     <div className="flex min-h-screen bg-background text-foreground">
@@ -248,7 +260,6 @@ export default function ForgePage() {
           <ErrorBoundary label="Forge main content">
             {view.kind === "surface" && view.surface === "projects" && (
               <div className="mx-auto w-full max-w-6xl space-y-6">
-                <SectionErrorBoundary label="Welcome"><ForgeHero onOpenControlCenter={() => goToSurface("system", "overview")} /></SectionErrorBoundary>
                 <div id="projects" className="scroll-mt-20" />
                 <SectionErrorBoundary label="Dashboard"><GlobalDashboard onOpenProject={openProject} /></SectionErrorBoundary>
                 <SectionErrorBoundary label="Projects"><ProjectList onOpenProject={openProject} onUploaded={openProject} /></SectionErrorBoundary>
