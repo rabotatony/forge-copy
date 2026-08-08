@@ -6,7 +6,7 @@
 // ============================================================
 import { useState, useEffect, lazy, Suspense } from "react";
 import {
-  LayoutDashboard, TerminalSquare, Eye, Rocket, Sparkles, Clock, Settings,
+  LayoutDashboard, TerminalSquare, Eye, Rocket, Sparkles, Clock, Settings, Bot,
 } from "lucide-react";
 import { Loading } from "./ui";
 
@@ -31,6 +31,7 @@ const AuditLogPanel = lazy(() => import("./capability-panels").then((m) => ({ de
 const SchedulerPanel = lazy(() => import("./capability-panels").then((m) => ({ default: m.SchedulerPanel })));
 const SearchPanel = lazy(() => import("./capability-panels").then((m) => ({ default: m.SearchPanel })));
 const AIAuditPanel = lazy(() => import("./capability-panels").then((m) => ({ default: m.AIAuditPanel })));
+const OpenWorkerPanel = lazy(() => import("./openworker-panel").then((m) => ({ default: m.OpenWorkerPanel })));
 
 const CATS = [
   { id: "overview", label: "Overview", icon: LayoutDashboard, panels: [["stats", StatsPanel], ["metrics", MetricsPanel], ["caps", CapabilitiesPanel]] },
@@ -38,6 +39,7 @@ const CATS = [
   { id: "observe", label: "Observe", icon: Eye, panels: [["observer", ObserverPanel], ["telemetry", TelemetryPanel], ["logs", SystemLogsViewer]] },
   { id: "deploy", label: "Deploy", icon: Rocket, panels: [["sites", SitesPanel]] },
   { id: "ai", label: "AI", icon: Sparkles, panels: [["assistant", AIAssistant], ["audit", AIAuditPanel], ["lab", ExperimentsLab]] },
+  { id: "agent", label: "Agent", icon: Bot, panels: [["openworker", OpenWorkerPanel]] },
   { id: "automate", label: "Automate", icon: Clock, panels: [["scheduler", SchedulerPanel]] },
   { id: "manage", label: "Manage", icon: Settings, panels: [["settings", GlobalSettings], ["tokens", ApiTokensPanel], ["auditlog", AuditLogPanel], ["search", SearchPanel]] },
 ] as const;
