@@ -20,7 +20,7 @@
 // ============================================================
 
 import type { ReactNode } from "react";
-import { Loader2, AlertCircle, Inbox } from "lucide-react";
+import { Loader2, AlertCircle, Inbox, Anvil } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import {
   Card,
@@ -71,13 +71,18 @@ export function Loading({
   return (
     <div
       className={cn(
-        "flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground",
+        "flex flex-col items-center justify-center gap-3 py-12 text-sm text-muted-foreground",
         className,
       )}
       role="status"
       aria-live="polite"
     >
-      <Loader2 className="size-4 animate-spin" aria-hidden />
+      <span className="relative flex size-9 items-center justify-center">
+        <span className="forge-ember absolute inset-0 rounded-lg" style={{ boxShadow: "0 0 22px 5px rgba(230,127,56,0.28)" }} />
+        <span className="relative flex size-9 items-center justify-center rounded-lg border border-amber-400/25 bg-gradient-to-b from-[#2a1a10] to-[#171008]">
+          <Anvil className="size-4 text-amber-400" aria-hidden />
+        </span>
+      </span>
       <span>{label}</span>
     </div>
   );
