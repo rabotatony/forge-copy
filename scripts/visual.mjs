@@ -81,8 +81,8 @@ console.log("PROSE-DIFF "+(pa!==pb&&pa.length>0));
 async function tarotFor(){
  const p=await browser.newPage({viewport:{width:1200,height:900}});
  await p.goto(BASE+"/tarot",{waitUntil:"networkidle"}).catch(()=>{});
- let has=await p.evaluate(()=>typeof window.MAJOR!=="undefined");
- if(!has){await p.reload({waitUntil:"networkidle"}).catch(()=>{});}
+ let has=await p.evaluate(()=>typeof window.MAJOR!=="undefined"&&typeof window.RosesAstro!=="undefined"&&typeof window.NUMERO!=="undefined");
+ if(!has){await p.reload({waitUntil:"networkidle"}).catch(()=>{});await p.waitForTimeout(600);}
  await p.fill("#pdate","1990-10-05").catch(()=>{});
  await p.click("#pers").catch(()=>{});
  await p.waitForTimeout(500);
