@@ -1,0 +1,104 @@
+/* ═══════════════════════════════════════════════════════════
+   FORGE MOTION — the grammar of fire & metal
+   Motion is not decoration. In the forge, every movement has
+   purpose: the ember breathes, the spark rises, the metal
+   glows as it is shaped, the anvil rings when struck.
+   ═══════════════════════════════════════════════════════════ */
+
+:root {
+  /* Forge easings — named gestures */
+  --forge-ease-bloom:  cubic-bezier(0.22, 1, 0.36, 1);  /* spark blooms outward */
+  --forge-ease-strike: cubic-bezier(0.16, 1, 0.3, 1);   /* hammer strike, fast then settles */
+  --forge-ease-ember:  cubic-bezier(0.45, 0, 0.55, 1);  /* ember breathes, symmetric */
+  --forge-ease-pour:   cubic-bezier(0.65, 0, 0.35, 1);  /* molten metal pours */
+
+  /* Forge fire palette (glows) */
+  --forge-ember:  230, 127, 56;   /* amber-400 */
+  --forge-flame:  207, 84, 44;    /* orange-500 */
+  --forge-gold:   255, 164, 105;  /* amber-300 */
+  --forge-teal:   62, 147, 103;   /* emerald-500 (the quenched steel) */
+}
+
+/* ─── EMBER GLOW — a coal breathing with heat ─── */
+@keyframes forge-ember-glow {
+  0%, 100% { opacity: 0.5; transform: scale(1); }
+  50%      { opacity: 0.95; transform: scale(1.06); }
+}
+.forge-ember { animation: forge-ember-glow 3.4s var(--forge-ease-ember) infinite; }
+
+/* ─── SPARK RISE — a spark leaps from the anvil and dies ─── */
+@keyframes forge-spark-rise {
+  0%   { transform: translate3d(0, 0, 0) scale(1); opacity: 0; }
+  8%   { opacity: 1; }
+  70%  { opacity: 0.9; }
+  100% { transform: translate3d(var(--spark-drift, 0px), -140px, 0) scale(0.15); opacity: 0; }
+}
+.forge-spark { animation: forge-spark-rise var(--spark-dur, 3s) linear infinite; animation-delay: var(--spark-delay, 0s); }
+
+/* ─── REVEAL — a thing forged into being (rise + de-blur) ─── */
+@keyframes forge-reveal {
+  0%   { opacity: 0; transform: translateY(26px); filter: blur(8px); }
+  100% { opacity: 1; transform: translateY(0); filter: blur(0); }
+}
+.forge-reveal { opacity: 0; animation: forge-reveal 0.8s var(--forge-ease-bloom) forwards; }
+
+/* ─── MOLTEN — headline glows white-hot as it is poured ─── */
+@keyframes forge-molten {
+  0%   { opacity: 0; transform: translateY(20px); text-shadow: 0 0 0 rgba(var(--forge-ember), 0); }
+  55%  { opacity: 1; text-shadow: 0 0 28px rgba(var(--forge-ember), 0.55), 0 0 60px rgba(var(--forge-flame), 0.25); }
+  100% { opacity: 1; transform: translateY(0); text-shadow: 0 0 14px rgba(var(--forge-ember), 0.22); }
+}
+.forge-molten { opacity: 0; animation: forge-molten 1s var(--forge-ease-bloom) forwards; }
+
+/* ─── ANVIL RING — the percussive pulse of a strike ─── */
+@keyframes forge-anvil-ring {
+  0%   { transform: scale(1); }
+  28%  { transform: scale(1.045); }
+  100% { transform: scale(1); }
+}
+.forge-anvil-ring { animation: forge-anvil-ring 2.6s var(--forge-ease-strike) infinite; }
+
+/* ─── HEAT DRIFT — warm air shimmering above the coals ─── */
+@keyframes forge-heat-drift {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1); opacity: 0.45; }
+  50%      { transform: translate3d(14px, -18px, 0) scale(1.1); opacity: 0.75; }
+}
+.forge-heat-drift { animation: forge-heat-drift 9s var(--forge-ease-ember) infinite; }
+
+/* ─── FLAME FLICKER — the forge fire never sits still ─── */
+@keyframes forge-flame-flicker {
+  0%, 100% { opacity: 1; filter: brightness(1); }
+  12% { opacity: 0.94; filter: brightness(0.97); }
+  26% { opacity: 1; filter: brightness(1.04); }
+  44% { opacity: 0.96; filter: brightness(0.99); }
+  63% { opacity: 1; filter: brightness(1.02); }
+  81% { opacity: 0.97; filter: brightness(0.98); }
+}
+.forge-flame { animation: forge-flame-flicker 3.8s ease-in-out infinite; }
+
+/* ─── QUENCH — the hiss of cooling steel (teal sweep) ─── */
+@keyframes forge-quench {
+  0%   { box-shadow: 0 0 0 0 rgba(var(--forge-teal), 0.5); }
+  100% { box-shadow: 0 0 0 16px rgba(var(--forge-teal), 0); }
+}
+.forge-quench { animation: forge-quench 1.6s var(--forge-ease-pour) infinite; }
+
+/* ─── Stagger helpers (forge reveals in sequence) ─── */
+.forge-d1 { animation-delay: 0.10s; }
+.forge-d2 { animation-delay: 0.22s; }
+.forge-d3 { animation-delay: 0.34s; }
+.forge-d4 { animation-delay: 0.46s; }
+.forge-d5 { animation-delay: 0.58s; }
+.forge-d6 { animation-delay: 0.70s; }
+.forge-d7 { animation-delay: 0.82s; }
+.forge-d8 { animation-delay: 0.94s; }
+
+/* ─── Hero card glow hover ─── */
+.forge-card { transition: transform 0.35s var(--forge-ease-bloom), box-shadow 0.35s var(--forge-ease-bloom), border-color 0.35s; }
+.forge-card:hover { transform: translateY(-4px); box-shadow: 0 10px 40px -12px rgba(var(--forge-ember), 0.35); }
+
+/* ─── Respect stillness ─── */
+@media (prefers-reduced-motion: reduce) {
+  .forge-reveal, .forge-molten, .forge-ember, .forge-spark, .forge-anvil-ring,
+  .forge-heat-drift, .forge-flame, .forge-quench { animation: none; opacity: 1; filter: none; transform: none; }
+}
