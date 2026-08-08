@@ -15,7 +15,6 @@ import {
   Rocket,
   Sparkles,
   Clock,
-  Bot,
 } from "lucide-react";
 import { ErrorBoundary, SectionErrorBoundary } from "@/components/forge/error-boundary";
 import { ThemeToggle } from "@/components/forge/theme-toggle";
@@ -84,7 +83,6 @@ const CONTROL_NAV = [
   { id: "deploy", label: "Deploy", icon: Rocket },
   { id: "ai", label: "AI", icon: Sparkles },
   { id: "automate", label: "Automate", icon: Clock },
-  { id: "agent", label: "Agent", icon: Bot },
   { id: "manage", label: "Manage", icon: Settings },
 ] as const;
 
