@@ -23,6 +23,15 @@ import {
   Activity,
   Zap,
   FileArchive,
+  LayoutDashboard,
+  TerminalSquare,
+  Eye,
+  Rocket,
+  Sparkles,
+  Clock,
+  Settings,
+  Library,
+  FolderGit2,
   type LucideIcon,
 } from "lucide-react";
 import { useTheme } from "next-themes";
@@ -56,11 +65,13 @@ export function CommandPalette({
   onOpenChange,
   onOpenProject,
   onUpload,
+  onGoTo,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onOpenProject?: (id: string) => void;
   onUpload?: () => void;
+  onGoTo?: (surface: string, category?: string) => void;
 }) {
   const { setTheme } = useTheme();
   const { data: projectsData } = useProjects();
@@ -109,6 +120,78 @@ export function CommandPalette({
       shortcut: "U",
       group: "Navigation",
       action: () => onUpload?.(),
+    },
+    {
+      id: "go-projects",
+      label: "Go to Projects",
+      description: "Dashboard & project list",
+      icon: FolderGit2,
+      group: "Navigate",
+      action: () => onGoTo?.("projects"),
+    },
+    {
+      id: "go-library",
+      label: "Go to Library",
+      description: "Templates & marketplace",
+      icon: Library,
+      group: "Navigate",
+      action: () => onGoTo?.("library"),
+    },
+    {
+      id: "cc-overview",
+      label: "Control Center: Overview",
+      description: "Stats, metrics, capabilities",
+      icon: LayoutDashboard,
+      group: "Control Center",
+      action: () => onGoTo?.("system", "overview"),
+    },
+    {
+      id: "cc-execute",
+      label: "Control Center: Execute",
+      description: "Terminal, mesh, memory",
+      icon: TerminalSquare,
+      group: "Control Center",
+      action: () => onGoTo?.("system", "execute"),
+    },
+    {
+      id: "cc-observe",
+      label: "Control Center: Observe",
+      description: "Observer, telemetry, logs",
+      icon: Eye,
+      group: "Control Center",
+      action: () => onGoTo?.("system", "observe"),
+    },
+    {
+      id: "cc-deploy",
+      label: "Control Center: Deploy",
+      description: "Sites & unique links",
+      icon: Rocket,
+      group: "Control Center",
+      action: () => onGoTo?.("system", "deploy"),
+    },
+    {
+      id: "cc-ai",
+      label: "Control Center: AI",
+      description: "Assistant, audit, lab",
+      icon: Sparkles,
+      group: "Control Center",
+      action: () => onGoTo?.("system", "ai"),
+    },
+    {
+      id: "cc-automate",
+      label: "Control Center: Automate",
+      description: "Scheduler",
+      icon: Clock,
+      group: "Control Center",
+      action: () => onGoTo?.("system", "automate"),
+    },
+    {
+      id: "cc-manage",
+      label: "Control Center: Manage",
+      description: "Settings, tokens, search",
+      icon: Settings,
+      group: "Control Center",
+      action: () => onGoTo?.("system", "manage"),
     },
     {
       id: "theme-light",
