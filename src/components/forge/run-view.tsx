@@ -212,7 +212,7 @@ function RunViewInner({
   }
 
   return (
-    <section className="mx-auto w-full max-w-6xl space-y-6">
+    <section className="forge-reveal mx-auto w-full max-w-6xl space-y-6">
       <div>
         <Button
           variant="ghost"
