@@ -102,3 +102,11 @@
   .forge-reveal, .forge-molten, .forge-ember, .forge-spark, .forge-anvil-ring,
   .forge-heat-drift, .forge-flame, .forge-quench { animation: none; opacity: 1; filter: none; transform: none; }
 }
+
+/* ─── APP ENTER — stepping from the landing into the workshop ─── */
+@keyframes forge-app-enter {
+  0%   { opacity: 0; transform: translateY(16px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+.forge-app-enter { animation: forge-app-enter 0.65s var(--forge-ease-bloom) both; }
+@media (prefers-reduced-motion: reduce) { .forge-app-enter { animation: none; opacity: 1; transform: none; } }
