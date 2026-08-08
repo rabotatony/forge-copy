@@ -4,7 +4,7 @@
 // Capabilities are grouped by purpose (not a flat wall of tabs),
 // and each reuses an existing panel — no duplicates.
 // ============================================================
-import { useState, lazy, Suspense } from "react";
+import { useState, useEffect, lazy, Suspense } from "react";
 import {
   LayoutDashboard, TerminalSquare, Eye, Rocket, Sparkles, Clock, Settings,
 } from "lucide-react";
@@ -42,8 +42,9 @@ const CATS = [
   { id: "manage", label: "Manage", icon: Settings, panels: [["settings", GlobalSettings], ["tokens", ApiTokensPanel], ["auditlog", AuditLogPanel], ["search", SearchPanel]] },
 ] as const;
 
-export function SystemConsole() {
-  const [cat, setCat] = useState<string>("overview");
+export function SystemConsole({ category }: { category?: string }) {
+  const [cat, setCat] = useState<string>(category || "overview");
+  useEffect(() => { if (category) setCat(category); }, [category]);
   const active = CATS.find((c) => c.id === cat) ?? CATS[0];
   return (
     <section className="mx-auto w-full max-w-6xl space-y-5">
