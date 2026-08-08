@@ -33,4 +33,27 @@ await page.reload({waitUntil:"load"}).catch(()=>{});
 await page.waitForTimeout(1000);
 const v1b=await page.evaluate(()=>{var e=document.getElementById("v1t");return e?e.textContent:"";});
 console.log("FINAL "+JSON.stringify({rep,v1,v1b,persist:v1===v1b&&v1.length>0}));
+
+// ---- READING TEST (professional) ----
+const rp=await browser.newPage({viewport:{width:1280,height:900}});
+const errs=[];rp.on("pageerror",e=>errs.push(String(e).slice(0,80)));rp.on("console",c=>{if(c.type()==="error")errs.push("c:"+c.text().slice(0,60));});
+await rp.goto(BASE+"/reading",{waitUntil:"load"}).catch(()=>{});
+await rp.fill("#bd","1990-10-05").catch(()=>{});
+await rp.fill("#nm","David Cohen").catch(()=>{});
+await rp.click("#go").catch(()=>{});
+await rp.waitForTimeout(800);
+const ov=await rp.evaluate(()=>{const v=[...document.querySelectorAll("#out .ov .v")].map(e=>e.textContent);return v;});
+const sunOk=ov.some(t=>t.includes("מאזניים"));
+const lifeOk=ov.some(t=>t.trim()==="7");
+// expand first body item
+await rp.evaluate(()=>{const hd=document.querySelector("#out .item .hd");if(hd)hd.click();});
+await rp.waitForTimeout(600);
+const expanded=await rp.evaluate(()=>{const it=document.querySelector("#out .item");return it?it.classList.contains("open")&&it.querySelector(".bd").textContent.includes("בית"):false;});
+const items=await rp.evaluate(()=>document.querySelectorAll("#out .item").length);
+await rp.screenshot({path:out+"/reading-desktop.png"});
+await rp.setViewportSize({width:390,height:844});
+await rp.waitForTimeout(400);
+await rp.screenshot({path:out+"/reading-mobile.png"});
+console.log("TEST "+JSON.stringify({sunOk,lifeOk,expanded,items,errors:errs.slice(0,5)}));
+
 await browser.close();
