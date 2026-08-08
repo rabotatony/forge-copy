@@ -62,7 +62,7 @@ function viewToHash(view: View) {
     case "landing": return "#/";
     case "surface":
       if (view.surface === "system" && view.category) return "#/system/" + view.category;
-      return "#/" + (view.surface === "projects" ? "" : view.surface);
+      return "#/" + view.surface;
     case "project": return "#/projects/" + view.projectId;
     case "run": return "#/projects/" + view.projectId + "/runs/" + view.runId;
     case "pipeline-run": return "#/projects/" + view.projectId + "/pipelines/" + view.pipelineRunId;
