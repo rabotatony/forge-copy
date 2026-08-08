@@ -32,6 +32,7 @@ import {
   Settings,
   Library,
   FolderGit2,
+  Bot,
   type LucideIcon,
 } from "lucide-react";
 import { useTheme } from "next-themes";
@@ -192,6 +193,14 @@ export function CommandPalette({
       icon: Settings,
       group: "Control Center",
       action: () => onGoTo?.("system", "manage"),
+    },
+    {
+      id: "cc-agent",
+      label: "Control Center: Agent",
+      description: "OpenWorker autonomous agent",
+      icon: Bot,
+      group: "Control Center",
+      action: () => onGoTo?.("system", "agent"),
     },
     {
       id: "theme-light",
