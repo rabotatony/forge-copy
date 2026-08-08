@@ -92,4 +92,17 @@ const t1=await tarotFor();const t2=await tarotFor();
 console.log("TAROT-1 "+t1.slice(0,120));
 console.log("TAROT-DET "+(t1===t2&&t1.length>0));
 
+
+// ---- READING rendered-text truth check (fresh visitor) ----
+const rc=await browser.newContext({viewport:{width:1280,height:900}});
+const rp2=await rc.newPage();
+await rp2.goto(BASE+"/reading",{waitUntil:"networkidle"}).catch(()=>{});
+let ok=await rp2.evaluate(()=>typeof window.RosesAstro!=="undefined"&&typeof window.REPORT!=="undefined");
+if(!ok){await rp2.reload({waitUntil:"networkidle"}).catch(()=>{});await rp2.waitForTimeout(800);}
+await rp2.waitForTimeout(1200);
+const rt=await rp2.evaluate(()=>{var e=document.getElementById("out");return e?e.innerText:"";});
+console.log("READ-LEN "+rt.length);
+console.log("READ-SAMPLE "+rt.slice(0,400).replace(/\n+/g," | "));
+await rc.close();
+
 await browser.close();
