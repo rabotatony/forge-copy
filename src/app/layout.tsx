@@ -14,9 +14,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Forge — Sovereign CI",
+  title: "Forge — The Body of the AI",
   description:
-    "Forge: a self-hosted CI/CD system for ZIP files. Upload a ZIP, pick a workflow, watch live logs stream in real time.",
+    "Forge gives the AI hands to build, eyes to see, and a fire of its own. Upload, build, deploy and verify — sovereign, on your own compute.",
   keywords: [
     "Forge",
     "CI/CD",
@@ -30,17 +30,17 @@ export const metadata: Metadata = {
     icon: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg",
   },
   openGraph: {
-    title: "Forge — Sovereign CI",
+    title: "Forge — The Body of the AI",
     description:
-      "A self-hosted CI/CD system for ZIP files. Upload, pick a workflow, watch live logs.",
+      "Forge gives the AI hands to build, eyes to see, and a fire of its own.",
     siteName: "Forge",
     type: "website",
   },
   twitter: {
     card: "summary_large_image",
-    title: "Forge — Sovereign CI",
+    title: "Forge — The Body of the AI",
     description:
-      "A self-hosted CI/CD system for ZIP files. Upload, pick a workflow, watch live logs.",
+      "Forge gives the AI hands to build, eyes to see, and a fire of its own.",
   },
 };
 
