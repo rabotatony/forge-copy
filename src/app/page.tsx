@@ -96,6 +96,7 @@ export default function ForgePage() {
   const [view, setView] = useState<View>({ kind: "landing" });
   const [ready, setReady] = useState(false);
   const [cmdOpen, setCmdOpen] = useState(false);
+  const [justEntered, setJustEntered] = useState(false);
   const { t, locale, rtl } = useTranslation();
 
   // Apply the URL hash after mount (SSR-safe, avoids hydration mismatch).
@@ -171,6 +172,14 @@ export default function ForgePage() {
     if (typeof window !== "undefined") window.scrollTo({ top: 0 });
   }, []);
 
+  // Step from the landing into the workshop with a smooth entrance.
+  const enterFromLanding = useCallback(() => {
+    setJustEntered(true);
+    setView({ kind: "surface", surface: "projects" });
+    if (typeof window !== "undefined") window.scrollTo({ top: 0 });
+    window.setTimeout(() => setJustEntered(false), 900);
+  }, []);
+
   const activeSurface: Surface = view.kind === "surface" ? view.surface : "projects";
   const isLanding = view.kind === "landing";
   const activeCategory = view.kind === "surface" && view.surface === "system" ? view.category : undefined;
@@ -179,13 +188,13 @@ export default function ForgePage() {
   if (isLanding) {
     return (
       <ErrorBoundary label="Forge landing">
-        <ForgeHero onEnterApp={() => goToSurface("projects")} onOpenControlCenter={() => goToSurface("system", "overview")} />
+        <ForgeHero onEnterApp={enterFromLanding} onOpenControlCenter={() => goToSurface("system", "overview")} />
       </ErrorBoundary>
     );
   }
 
   return (
-    <div className="flex min-h-screen bg-background text-foreground">
+    <div className={"flex min-h-screen bg-background text-foreground" + (justEntered ? " forge-app-enter" : "")}>
       {/* ===== Desktop sidebar ===== */}
       <aside className="sticky top-0 z-30 hidden h-screen w-60 shrink-0 flex-col border-r border-border bg-background/70 backdrop-blur md:flex">
         <button type="button" onClick={backToProjects} className="flex items-center gap-2.5 px-5 py-5 text-left transition-opacity hover:opacity-80">
