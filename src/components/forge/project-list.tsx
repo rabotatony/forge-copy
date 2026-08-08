@@ -15,6 +15,12 @@ import {
   CheckCircle2,
   XCircle,
   Clock,
+  Anvil,
+  Flame,
+  Upload,
+  GitBranch,
+  LayoutTemplate,
+  ArrowRight,
 } from "lucide-react";
 import { motion } from "framer-motion";
 import { toast } from "sonner";
@@ -149,24 +155,7 @@ export function ProjectList({
           ))}
         </motion.div>
       ) : (
-        <Card className="border-dashed">
-          <CardContent>
-            <EmptyState
-              icon={Inbox}
-              title="No projects yet"
-              description="Click New Project to upload a ZIP, clone a repo, or start from a template."
-              action={
-                <Button
-                  onClick={() => setCreateOpen(true)}
-                  className="gap-1.5 bg-emerald-600 text-white hover:bg-emerald-700"
-                >
-                  <Plus className="size-4" />
-                  New Project
-                </Button>
-              }
-            />
-          </CardContent>
-        </Card>
+        <ForgeEmpty onNew={() => setCreateOpen(true)} />
       )}
 
       {/* Create dialog */}
@@ -175,6 +164,75 @@ export function ProjectList({
         onOpenChange={setCreateOpen}
         onCreated={onUploaded}
       />
+    </section>
+  );
+}
+
+
+// ---------------------------------------------------------------------------
+// ForgeEmpty — the first-run onboarding, told in the forge language
+// ---------------------------------------------------------------------------
+const EMPTY_SPARKS = [
+  { l: 18, d: 0.0, dur: 3.4, dr: 10, s: 3 },
+  { l: 42, d: 1.2, dur: 4.2, dr: -8, s: 2 },
+  { l: 66, d: 0.6, dur: 3.8, dr: 12, s: 3 },
+  { l: 84, d: 2.0, dur: 4.6, dr: -10, s: 2 },
+];
+const EMPTY_OPTS = [
+  { icon: Upload, title: "Upload a project", line: "Drop a ZIP or any archive — Forge unpacks it and reads what it is." },
+  { icon: GitBranch, title: "Clone a repository", line: "Point Forge at a Git repo and pull the source straight in." },
+  { icon: LayoutTemplate, title: "Start from a template", line: "Begin with a ready-made scaffold from the library." },
+] as const;
+
+function ForgeEmpty({ onNew }: { onNew: () => void }) {
+  return (
+    <section className="relative isolate overflow-hidden rounded-2xl border border-amber-400/15 bg-[#0c0a08] px-6 py-14 text-center">
+      <div aria-hidden className="pointer-events-none absolute inset-0 -z-10">
+        <div className="absolute inset-x-0 bottom-0 h-[80%] forge-flame"
+             style={{ background: "radial-gradient(55% 80% at 50% 115%, rgba(207,84,44,0.35), rgba(230,127,56,0.15) 45%, transparent 70%)" }} />
+        <div className="absolute bottom-[-40px] left-1/2 h-[220px] w-[440px] -translate-x-1/2 forge-heat-drift"
+             style={{ background: "radial-gradient(closest-side, rgba(255,164,105,0.25), transparent)", filter: "blur(26px)" }} />
+        {EMPTY_SPARKS.map((k, i) => (
+          <span key={i} className="forge-spark absolute bottom-[6%] rounded-full"
+            style={{ left: `${k.l}%`, width: k.s, height: k.s, background: "rgb(255,200,130)", boxShadow: "0 0 8px 2px rgba(255,164,105,0.8)",
+              ["--spark-dur" as any]: `${k.dur}s`, ["--spark-delay" as any]: `${k.d}s`, ["--spark-drift" as any]: `${k.dr}px` }} />
+        ))}
+      </div>
+
+      <div className="forge-reveal relative mx-auto mb-6 w-fit">
+        <span className="forge-ember absolute inset-0 rounded-2xl" style={{ boxShadow: "0 0 52px 12px rgba(230,127,56,0.3)" }} />
+        <span className="relative flex size-16 items-center justify-center rounded-2xl border border-amber-400/30 bg-gradient-to-b from-[#2a1a10] to-[#171008]">
+          <Anvil className="size-8 text-amber-400" aria-hidden />
+        </span>
+      </div>
+
+      <h3 className="forge-reveal forge-d1 text-2xl font-semibold tracking-tight text-[#f5ead6]">Light your first forge</h3>
+      <p className="forge-reveal forge-d2 mx-auto mt-2 max-w-md text-sm leading-relaxed text-[#b6ae9f]">
+        Every build starts as raw material. Bring a project in and Forge will shape it — analyze, build, deploy, and verify.
+      </p>
+
+      <div className="forge-reveal forge-d3 mx-auto mt-9 grid max-w-3xl gap-3 text-left sm:grid-cols-3">
+        {EMPTY_OPTS.map((o) => {
+          const Icon = o.icon;
+          return (
+            <button key={o.title} type="button" onClick={onNew}
+              className="forge-card rounded-xl border border-amber-400/10 bg-[#141009]/70 p-4 text-left backdrop-blur-sm">
+              <span className="mb-2.5 flex size-9 items-center justify-center rounded-lg bg-amber-400/10 text-amber-400">
+                <Icon className="size-4" aria-hidden />
+              </span>
+              <div className="text-sm font-semibold text-[#ece3d0]">{o.title}</div>
+              <p className="mt-1 text-xs leading-relaxed text-[#9b948a]">{o.line}</p>
+            </button>
+          );
+        })}
+      </div>
+
+      <button type="button" onClick={onNew}
+        className="forge-flame forge-reveal forge-d4 group mt-9 inline-flex items-center gap-2 rounded-lg bg-gradient-to-r from-amber-500 to-orange-600 px-6 py-3 text-sm font-semibold text-[#1a0d04] shadow-[0_8px_28px_-6px_rgba(230,127,56,0.5)] transition-transform hover:scale-[1.03]">
+        <Flame className="size-4" aria-hidden />
+        Start a new project
+        <ArrowRight className="size-4 transition-transform group-hover:translate-x-0.5" aria-hidden />
+      </button>
     </section>
   );
 }
