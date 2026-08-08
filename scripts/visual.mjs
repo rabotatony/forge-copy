@@ -58,4 +58,22 @@ await rp.waitForTimeout(400);
 await rp.screenshot({path:out+"/reading-mobile.png"});
 console.log("TEST "+JSON.stringify({sunOk,lifeOk,expanded,items,errors:errs.slice(0,5)}));
 
+
+// ---- PROSE uniqueness test ----
+async function proseFor(date){
+ const p=await browser.newPage({viewport:{width:1200,height:900}});
+ await p.goto(BASE+"/reading",{waitUntil:"networkidle"}).catch(()=>{});
+ let has=await p.evaluate(()=>typeof window.RosesAstro!=="undefined");
+ if(!has){await p.reload({waitUntil:"networkidle"}).catch(()=>{});}
+ await p.fill("#bd",date).catch(()=>{});
+ await p.click("#go").catch(()=>{});
+ await p.waitForTimeout(600);
+ const t=await p.evaluate(()=>{var e=document.getElementById("prose");return e?e.textContent:"";});
+ await p.close();return t;}
+const pa=await proseFor("1990-10-05");
+const pb=await proseFor("2000-01-01");
+console.log("PROSE-A "+pa);
+console.log("PROSE-B "+pb);
+console.log("PROSE-DIFF "+(pa!==pb&&pa.length>0));
+
 await browser.close();
