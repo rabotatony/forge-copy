@@ -37,7 +37,9 @@ console.log("FINAL "+JSON.stringify({rep,v1,v1b,persist:v1===v1b&&v1.length>0}))
 // ---- READING TEST (professional) ----
 const rp=await browser.newPage({viewport:{width:1280,height:900}});
 const errs=[];rp.on("pageerror",e=>errs.push(String(e).slice(0,80)));rp.on("console",c=>{if(c.type()==="error")errs.push("c:"+c.text().slice(0,60));});
-await rp.goto(BASE+"/reading",{waitUntil:"load"}).catch(()=>{});
+await rp.goto(BASE+"/reading",{waitUntil:"networkidle"}).catch(()=>{});
+let has=await rp.evaluate(()=>typeof window.RosesAstro!=="undefined");
+if(!has){await rp.reload({waitUntil:"networkidle"}).catch(()=>{});await rp.waitForTimeout(800);}
 await rp.fill("#bd","1990-10-05").catch(()=>{});
 await rp.fill("#nm","David Cohen").catch(()=>{});
 await rp.click("#go").catch(()=>{});
