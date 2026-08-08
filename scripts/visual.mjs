@@ -24,11 +24,14 @@ for(const r of routes){
 // interaction proof on /
 await page.goto(BASE+"/",{waitUntil:"load"}).catch(()=>{});
 await page.waitForTimeout(2500);
-const before=await page.evaluate(()=>document.getElementById("dname")?document.getElementById("dname").textContent:"");
-const chips=await page.evaluate(()=>document.querySelectorAll(".chip").length);
-await page.evaluate(()=>{var c=document.querySelectorAll(".chip");if(c[3])c[3].click();});
-await page.waitForTimeout(500);
-const after=await page.evaluate(()=>document.getElementById("dname")?document.getElementById("dname").textContent:"");
-const detail=await page.evaluate(()=>({pos:document.getElementById("dpos").textContent,house:document.getElementById("dhouse").textContent,asp:(document.getElementById("daspects").textContent||"").slice(0,60)}));
+let before="",after="",chips=0,detail={};
+try{
+ before=await page.evaluate(()=>{var e=document.getElementById("dname");return e?e.textContent:"";});
+ chips=await page.evaluate(()=>document.querySelectorAll(".chip").length);
+ await page.evaluate(()=>{var c=document.querySelectorAll(".chip");if(c[3])c[3].click();});
+ await page.waitForTimeout(500);
+ after=await page.evaluate(()=>{var e=document.getElementById("dname");return e?e.textContent:"";});
+ detail=await page.evaluate(()=>{var g=function(id){var e=document.getElementById(id);return e?e.textContent:"";};return {pos:g("dpos"),house:g("dhouse"),asp:g("daspects").slice(0,60)};});
+}catch(e){detail={err:String(e).slice(0,80)};}
 console.log("CONTENT "+JSON.stringify({rep,before,after,chips,detail}));
 await browser.close();
