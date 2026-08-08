@@ -186,7 +186,7 @@ export function LibraryView({
   }, [combined]);
 
   return (
-    <section className="mx-auto w-full max-w-6xl space-y-6">
+    <section className="forge-reveal mx-auto w-full max-w-6xl space-y-6">
       {/* Header */}
       <div className="space-y-1">
         <h2 className="flex items-center gap-2 text-2xl font-semibold tracking-tight">
