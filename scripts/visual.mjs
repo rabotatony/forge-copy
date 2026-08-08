@@ -76,4 +76,20 @@ console.log("PROSE-A "+pa);
 console.log("PROSE-B "+pb);
 console.log("PROSE-DIFF "+(pa!==pb&&pa.length>0));
 
+
+// ---- TAROT determinism test ----
+async function tarotFor(){
+ const p=await browser.newPage({viewport:{width:1200,height:900}});
+ await p.goto(BASE+"/tarot",{waitUntil:"networkidle"}).catch(()=>{});
+ let has=await p.evaluate(()=>typeof window.MAJOR!=="undefined");
+ if(!has){await p.reload({waitUntil:"networkidle"}).catch(()=>{});}
+ await p.fill("#pdate","1990-10-05").catch(()=>{});
+ await p.click("#pers").catch(()=>{});
+ await p.waitForTimeout(500);
+ const t=await p.evaluate(()=>{var e=document.getElementById("personal");return e?e.textContent:"";});
+ await p.close();return t;}
+const t1=await tarotFor();const t2=await tarotFor();
+console.log("TAROT-1 "+t1.slice(0,120));
+console.log("TAROT-DET "+(t1===t2&&t1.length>0));
+
 await browser.close();
