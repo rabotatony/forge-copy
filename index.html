@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>שושנה · טקס יומי</title>
+<style>
+  :root { --bg:#e8dfc8; --ink:#1a1612; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--ink); font-family:Georgia, "Times New Roman", serif; }
+  .ritual { min-height:100vh; display:flex; flex-direction:column; align-items:center; }
+  section { width:100%; max-width:620px; text-align:center; padding:8vh 1.5rem; }
+  .opening { min-height:50vh; display:flex; align-items:center; justify-content:center; }
+  .opening p { font-size:1.5rem; line-height:2; letter-spacing:.06em; opacity:.9; }
+  .card-glyph { font-size:4rem; opacity:.5; }
+  .card-name { font-size:2.2rem; letter-spacing:.12em; margin:1.5rem 0 .5rem; }
+  .card-keyword { font-size:1rem; opacity:.6; letter-spacing:.25em; margin-bottom:2rem; }
+  .card-meaning { font-size:1.1rem; line-height:2; opacity:.85; max-width:520px; margin:0 auto; }
+  .whisper { font-size:1.3rem; line-height:2.2; font-style:italic; opacity:.75; }
+  .cosmic { border-top:1px solid rgba(26,22,18,.15); border-bottom:1px solid rgba(26,22,18,.15); padding:5vh 1.5rem; }
+  .cosmic p { font-size:.95rem; line-height:2; opacity:.6; letter-spacing:.08em; margin:.4rem 0; }
+  .story-title { font-size:1.4rem; margin-bottom:1.5rem; }
+  .story-body { font-size:1.05rem; line-height:2.2; opacity:.8; text-align:right; max-width:560px; margin:0 auto 2rem; }
+  .story-teaching { font-size:1rem; opacity:.6; font-style:italic; }
+  .closing { padding:14vh 1.5rem; }
+  .closing p { font-size:1.05rem; opacity:.5; letter-spacing:.15em; }
+</style>
+</head>
+<body>
+<div class="ritual">
+  <section class="opening"><p id="opening"></p></section>
+  <section>
+    <div class="card-glyph" id="cardGlyph"></div>
+    <h1 class="card-name" id="cardName"></h1>
+    <p class="card-keyword" id="cardKeyword"></p>
+    <p class="card-meaning" id="cardMeaning"></p>
+  </section>
+  <section><p class="whisper" id="whisper"></p></section>
+  <section class="cosmic"><p id="lunar"></p><p id="season"></p></section>
+  <section>
+    <h3 class="story-title" id="storyTitle"></h3>
+    <p class="story-body" id="storyBody"></p>
+    <p class="story-teaching" id="storyTeaching"></p>
+  </section>
+  <section class="closing"><p id="closing"></p></section>
+</div>
+<script>
+const CARDS=[
+ {g:"א",n:"הקוסם",k:"רצון",m:"הכוח לפעול נמצא בך גם כשאינך מרגיש מוכן. צעד קטן אחד היום פותח את הדלת."},
+ {g:"ו",n:"האוהבים",k:"בחירה",m:"כל בחירה אמיתית דורשת לוותר על משהו. בחר במה שחשוב לך באמת."},
+ {g:"י",n:"הגלגל",k:"מחזור",m:"מה שיורד יעלה. לא הכל בשליטתך — אבל תגובתך כן."},
+ {g:"טז",n:"המגדל",k:"זעזוע",m:"לפעמים ההרס הוא פינוי הקרקע לבנייה נכונה יותר."},
+ {g:"יז",n:"הכוכב",k:"תקווה",m:"אחרי כל קריסה מגיע רגע של בהירות. הקשב לו."}
+];
+const PROVERBS=[
+ "מעלה ומטה שתי אצבעות של אותה יד. נס אחד.",
+ "המס והצך. נמס, נקרש, ושוב נמס. האבן יושבת באמצע.",
+ "שלושים חישורים בטבור אחד. הגלגל נוסע על הריק שבאמצע."
+];
+const STORIES=[
+ {t:"בת המלך האבודה",b:"מעשה בבת מלך שיצאה מארמון אביה בלילה ולא חזרה. ימים רבים חיפש אותה המלך, והיא ישבה בבקתה אצל נהר רחוק ולא ידעה שהיא בת מלך. עד שיום אחד שמעה קול: בתי, קומי ושובי.",l:"הריח שעל כף היד זוכר מה שהחלום שכח."},
+ {t:"הגשר והנזיר",b:"נזיר עמד על גשר ושאל כל עובר: מאין באת ולאן אתה הולך? איש לא עצר. רק ילד אחד עצר ואמר: ואני? מאין באת אתה? והנזיר חייך לראשונה מזה שנים.",l:"שאלה אחת כנה שווה אלף תשובות."}
+];
+function dayNum(){const n=new Date(),s=new Date(n.getFullYear(),0,0);return Math.floor((n-s)/864e5);}
+const d=dayNum();
+const h=new Date().getHours();
+document.getElementById("opening").textContent =
+  (h>=5&&h<10)?"הבוקר עלה. מה אתה מבקש היום?":
+  (h>=10&&h<16)?"היום בעיצומו. עצור לרגע.":
+  (h>=16&&h<20)?"היום נסגר. מה נשאר?":"הלילה. הזמן שבו הכל שקט.";
+document.getElementById("closing").textContent =
+  (h>=5&&h<10)?"היום נפתח. לך אליו.":
+  (h>=10&&h<16)?"היום ממשיך. אבל אתה כבר לא אותו דבר.":
+  (h>=16&&h<20)?"הערב יורד. קח איתך רק מה שצריך.":"הלילה שומר. מחר יבוא.";
+const c=CARDS[d%CARDS.length];
+document.getElementById("cardGlyph").textContent=c.g;
+document.getElementById("cardName").textContent=c.n;
+document.getElementById("cardKeyword").textContent=c.k;
+document.getElementById("cardMeaning").textContent=c.m;
+document.getElementById("whisper").textContent=PROVERBS[d%PROVERBS.length];
+// lunar phase
+const ref=new Date(2000,0,6,18,14).getTime();
+const phase=((Date.now()-ref)/864e5 % 29.53)/29.53;
+const lunarName = phase<0.0625?"מולד":phase<0.3125?"סהר מתמלא":phase<0.5625?"מלא":"סהר מתמעט";
+const lunarTheme = phase<0.25?"זמן לזרוע. מה אתה רוצה שיתחיל?":phase<0.5?"הדבר גדל. תן לו מקום.":phase<0.75?"השיא. מה אתה רואה עכשיו?":"זמן לשחרר. מה כבר לא צריך?";
+document.getElementById("lunar").textContent="ירח: "+lunarName+" — "+lunarTheme;
+const m=new Date().getMonth()+1;
+const season=m>=3&&m<=5?"אביב":m>=6&&m<=8?"קיץ":m>=9&&m<=11?"סתיו":"חורף";
+const seasonTheme={ "אביב":"משהו חדש מתחיל. מה נולד?","קיץ":"הכל פורח. מה אתה עושה עם השפע?","סתיו":"זמן לאסוף. מה הבשיל?","חורף":"זמן לנוח. מה מחכה מתחת לפני השטח?" }[season];
+document.getElementById("season").textContent="עונה: "+season+" — "+seasonTheme;
+const s=STORIES[d%STORIES.length];
+document.getElementById("storyTitle").textContent=s.t;
+document.getElementById("storyBody").textContent=s.b;
+document.getElementById("storyTeaching").textContent=s.l;
+</script>
+</body>
+</html>
