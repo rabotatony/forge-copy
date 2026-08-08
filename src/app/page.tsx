@@ -307,7 +307,7 @@ export default function ForgePage() {
         </footer>
       </div>
 
-      <CommandPalette open={cmdOpen} onOpenChange={setCmdOpen} onOpenProject={openProject} />
+      <CommandPalette open={cmdOpen} onOpenChange={setCmdOpen} onOpenProject={openProject} onGoTo={(s, c) => goToSurface(s as Surface, c)} />
     </div>
   );
 }
